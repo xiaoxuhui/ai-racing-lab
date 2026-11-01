@@ -4,33 +4,46 @@
  'use strict';
  const DIRS=[[1,0],[0,1],[-1,0],[0,-1]],SPEEDS=[.5,1,3,6],ACTIONS=['straight','accelerate','decelerate','left','right'];
  const key=(x,y)=>`${x},${y}`,clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+ const edgeKey=(a,b)=>a<b?`${a}|${b}`:`${b}|${a}`;
  function makeMap(index,custom){
-  const roads=new Set(),segments=[],bridges=new Set();
-  function line(x1,y1,x2,y2){segments.push([x1,y1,x2,y2]);const dx=Math.sign(x2-x1),dy=Math.sign(y2-y1);let x=x1,y=y1;roads.add(key(x,y));while(x!==x2||y!==y2){x+=dx;y+=dy;roads.add(key(x,y));}}
-  if(custom){for(const k of custom.roads||[])if(/^\d+,\d+$/.test(k)){const [x,y]=k.split(',').map(Number);if(x<=16&&y<=10)roads.add(k);}for(const k of custom.bridges||[])if(roads.has(k))bridges.add(k);for(const k of roads){const [x,y]=k.split(',').map(Number);segments.push([x,y,x,y]);for(const[dx,dy]of [[1,0],[0,1]])if(roads.has(key(x+dx,y+dy)))segments.push([x,y,x+dx,y+dy]);}}
+  const roads=new Set(),edges=new Set(),segments=[],bridges=new Set(),width=clamp(Math.trunc(Number(custom?.width)||17),5,40),height=clamp(Math.trunc(Number(custom?.height)||11),5,30);
+  function line(x1,y1,x2,y2){segments.push([x1,y1,x2,y2]);const dx=Math.sign(x2-x1),dy=Math.sign(y2-y1);let x=x1,y=y1;roads.add(key(x,y));while(x!==x2||y!==y2){const old=key(x,y);x+=dx;y+=dy;roads.add(key(x,y));edges.add(edgeKey(old,key(x,y)));}}
+  if(custom){
+   for(const k of custom.roads||[])if(/^\d+,\d+$/.test(k)){const[x,y]=k.split(',').map(Number);if(x<width&&y<height)roads.add(k);}
+   for(const k of custom.bridges||[])if(roads.has(k))bridges.add(k);
+   if(Array.isArray(custom.edges)){for(const e of custom.edges){if(typeof e!=='string')continue;const parts=e.split('|');if(parts.length!==2)continue;const[a,b]=parts;if(!roads.has(a)||!roads.has(b))continue;const[x,y]=a.split(',').map(Number),[bx,by]=b.split(',').map(Number);if(Math.abs(x-bx)+Math.abs(y-by)===1)edges.add(edgeKey(a,b));}}
+   else{ // Preserve older saved maps; all newly edited maps store explicit edges.
+    for(const k of roads){const[x,y]=k.split(',').map(Number);for(const[dx,dy]of [[1,0],[0,1]])if(roads.has(key(x+dx,y+dy)))edges.add(edgeKey(k,key(x+dx,y+dy)));}
+   }
+   for(const k of roads){const[x,y]=k.split(',').map(Number);segments.push([x,y,x,y]);}
+   for(const e of edges){const[a,b]=e.split('|'),[x,y]=a.split(',').map(Number),[bx,by]=b.split(',').map(Number);segments.push([x,y,bx,by]);}
+  }
   else if(index===0){line(0,8,14,8);line(4,8,4,5);line(4,5,14,5);line(12,5,12,2);line(6,2,16,2);line(6,1,6,9);line(14,5,14,8);bridges.add('6,5');}
   else if(index===1){line(0,8,12,8);line(3,8,3,2);line(3,2,16,2);line(8,1,8,9);line(3,5,14,5);line(12,2,12,8);line(14,5,14,9);}
   else{line(0,8,14,8);line(2,8,2,2);line(2,2,16,2);line(14,2,14,8);line(2,5,14,5);line(9,2,9,8);bridges.add('9,5');}
-  const map={index,roads,segments,bridges,start:custom?.start||[0,8],goal:custom?.goal||[16,2],startDir:custom?.startDir??0};
+  const endpoint=(name,fallback)=>{const p=custom&&Object.hasOwn(custom,name)?custom[name]:fallback;return Array.isArray(p)&&p.length===2&&p.every(Number.isInteger)&&p[0]>=0&&p[0]<width&&p[1]>=0&&p[1]<height?[...p]:null;};
+  const map={index,width,height,roads,edges,segments,bridges,start:endpoint('start',[0,8]),goal:endpoint('goal',[16,2]),startDir:clamp(Math.trunc(Number(custom?.startDir)||0),0,3)};
   const reverse=new Map();
-  for(const pos of roads){const[x,y]=pos.split(',').map(Number);for(let d=0;d<4;d++){const from=`${x},${y},${d}`;for(const nd of [d,(d+1)%4,(d+3)%4]){if(bridges.has(pos)&&nd!==d)continue;const nx=x+DIRS[nd][0],ny=y+DIRS[nd][1];if(!roads.has(key(nx,ny)))continue;const to=`${nx},${ny},${nd}`;if(!reverse.has(to))reverse.set(to,[]);reverse.get(to).push(from);}}}
-  map.dist=new Map();const queue=[];for(let d=0;d<4;d++){const k=`${map.goal[0]},${map.goal[1]},${d}`;map.dist.set(k,0);queue.push(k);}for(let i=0;i<queue.length;i++){const k=queue[i];for(const p of reverse.get(k)||[]){if(!map.dist.has(p)){map.dist.set(p,map.dist.get(k)+1);queue.push(p);}}}return map;
+  for(const pos of roads){const[x,y]=pos.split(',').map(Number);for(let d=0;d<4;d++){const from=`${x},${y},${d}`;for(const nd of [d,(d+1)%4,(d+3)%4]){if(bridges.has(pos)&&nd!==d)continue;const nx=x+DIRS[nd][0],ny=y+DIRS[nd][1];if(!edges.has(edgeKey(pos,key(nx,ny))))continue;const to=`${nx},${ny},${nd}`;if(!reverse.has(to))reverse.set(to,[]);reverse.get(to).push(from);}}}
+  map.dist=new Map();const queue=[];if(map.goal)for(let d=0;d<4;d++){const k=`${map.goal[0]},${map.goal[1]},${d}`;map.dist.set(k,0);queue.push(k);}for(let i=0;i<queue.length;i++){const k=queue[i];for(const p of reverse.get(k)||[]){if(!map.dist.has(p)){map.dist.set(p,map.dist.get(k)+1);queue.push(p);}}}return map;
  }
- function serializeMap(map){return {roads:[...map.roads],bridges:[...map.bridges],start:[...map.start],goal:[...map.goal],startDir:map.startDir};}
- function initial(map){return {x:map?.start[0]??0,y:map?.start[1]??8,d:map?.startDir??0,v:1,steps:0,time:0,done:false,won:false,reason:'',action:'straight'};}
+ function serializeMap(map){return {width:map.width,height:map.height,roads:[...map.roads],edges:[...map.edges],bridges:[...map.bridges],start:map.start?[...map.start]:null,goal:map.goal?[...map.goal]:null,startDir:map.startDir};}
+ function resizeMap(data,width,height){return serializeMap(makeMap(3,{...data,width,height}));}
+ function mapIssue(map){if(!map.start)return '请放置入口';if(!map.goal)return '请放置出口';if(key(...map.start)===key(...map.goal))return '入口和出口需要放在不同位置';if(!map.roads.has(key(...map.start))||!map.roads.has(key(...map.goal)))return '请补齐入口与出口所在的道路';if(!map.dist.has(`${map.start[0]},${map.start[1]},${map.startDir}`))return '入口尚未连通出口，请补齐道路或调整入口朝向';for(const k of map.bridges){const[x,y]=k.split(',').map(Number);if(!DIRS.every(([dx,dy])=>map.edges.has(edgeKey(k,key(x+dx,y+dy)))))return '高架桥需连接四个方向的道路';}return '';}
+ function initial(map){return {x:map?.start?.[0]??0,y:map?.start?.[1]??8,d:map?.startDir??0,v:1,steps:0,time:0,done:false,won:false,reason:'',action:'straight'};}
  function stateKey(s){return `${s.x},${s.y},${s.d},${s.v}`;}
  function transition(map,s,a){
   if(s.done)return {state:{...s},reward:0};const n={...s,steps:s.steps+1,action:a};
   if(a==='accelerate')n.v=Math.min(3,s.v+1);if(a==='decelerate')n.v=Math.max(0,s.v-1);n.time+=1/SPEEDS[s.v];
   if((a==='left'||a==='right')&&map.bridges.has(key(s.x,s.y))){n.done=true;n.reason='高架上下道路不连通';return {state:n,reward:-35};}
   if(a==='left')n.d=(n.d+3)%4;if(a==='right')n.d=(n.d+1)%4;n.x+=DIRS[n.d][0];n.y+=DIRS[n.d][1];
-  if(!map.roads.has(key(n.x,n.y))){n.done=true;n.reason='驶出道路';return {state:n,reward:-35};}
+  if(!map.edges.has(edgeKey(key(s.x,s.y),key(n.x,n.y)))){n.done=true;n.reason='驶出道路';return {state:n,reward:-35};}
   if(n.x===map.goal[0]&&n.y===map.goal[1]){n.done=true;n.won=true;n.reason='成功抵达出口';return {state:n,reward:120};}
-  if(n.steps>=180){n.done=true;n.reason='本轮探索结束';return {state:n,reward:-20};}
+  if(n.steps>=map.width*map.height*4){n.done=true;n.reason='本轮探索结束';return {state:n,reward:-20};}
   const before=map.dist.get(`${s.x},${s.y},${s.d}`)??50,after=map.dist.get(`${n.x},${n.y},${n.d}`)??50;
   return {state:n,reward:1.4*(before-after)-.15-.28/SPEEDS[s.v]};
  }
- function reference(map){let s=initial(map);const points=[s],seen=new Set();while(!s.done){const k=stateKey(s);if(seen.has(k))break;seen.add(k);const options=['straight','left','right'].map(a=>transition(map,s,a).state).filter(n=>!n.done||n.won).sort((a,b)=>(map.dist.get(`${a.x},${a.y},${a.d}`)??999)-(map.dist.get(`${b.x},${b.y},${b.d}`)??999));if(!options.length)break;s=options[0];points.push(s);}return points;}
+ function reference(map){if(!map.start||!map.goal)return [];let s=initial(map);const points=[s],seen=new Set();while(!s.done){const k=stateKey(s);if(seen.has(k))break;seen.add(k);const options=['straight','left','right'].map(a=>transition(map,s,a).state).filter(n=>!n.done||n.won).sort((a,b)=>(map.dist.get(`${a.x},${a.y},${a.d}`)??999)-(map.dist.get(`${b.x},${b.y},${b.d}`)??999));if(!options.length)break;s=options[0];points.push(s);}return points;}
  function smoothPath(points){
   const samples=[];function add(x,y,v){const prev=samples[samples.length-1],distance=prev?prev.distance+Math.hypot(x-prev.x,y-prev.y):0;samples.push({x,y,v,distance});}
   function line(a,b,v){const n=Math.max(1,Math.ceil(Math.hypot(a.x-b.x,a.y-b.y)/.035));for(let i=1;i<=n;i++){const t=i/n;add(a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t,v);}}
@@ -46,5 +59,5 @@
   if(s.bridgeLock){const b=s.bridgeLock;if(Math.abs(s.x-b.x)>.7||Math.abs(s.y-b.y)>.7)s.bridgeLock=null;else if((b.axis==='h'?Math.abs(s.y-b.y):Math.abs(s.x-b.x))>.33){s.done=true;s.reason='碰到高架护栏';}}
   if(!onRoad(map,s.x,s.y)){s.done=true;s.reason='驶出道路';}if(Math.hypot(s.x-map.goal[0],s.y-map.goal[1])<.34){s.done=true;s.won=true;s.reason='成功抵达出口';}return s;
  }
- const api={DIRS,SPEEDS,ACTIONS,key,clamp,makeMap,serializeMap,initial,stateKey,transition,reference,smoothPath,onRoad,continuousInitial,advanceManual};root.Racing=api;if(typeof module!=='undefined')module.exports=api;
+ const api={DIRS,SPEEDS,ACTIONS,key,edgeKey,clamp,makeMap,serializeMap,resizeMap,mapIssue,initial,stateKey,transition,reference,smoothPath,onRoad,continuousInitial,advanceManual};root.Racing=api;if(typeof module!=='undefined')module.exports=api;
 })(typeof window!=='undefined'?window:globalThis);

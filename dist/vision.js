@@ -3,17 +3,18 @@
 (()=>{'use strict';
 const E=globalThis.Racing,OFFSETS=[-105,-70,-35,0,35,70,105].map(v=>v*Math.PI/180),ACTIONS=E.ACTIONS,DT=1/15;
 const controls={straight:{throttle:0,brake:0,steer:0},accelerate:{throttle:1,brake:0,steer:0},decelerate:{throttle:0,brake:1,steer:0},left:{throttle:0,brake:0,steer:-1},right:{throttle:0,brake:0,steer:1}};
-const fields=new WeakMap(),RES=24,WIDTH=17*RES,HEIGHT=11*RES;
+const fields=new WeakMap(),RES=24;
 function surface(map){
- if(fields.has(map))return fields.get(map);const grid=new Uint8Array(WIDTH*HEIGHT);
- for(let j=0;j<HEIGHT;j++)for(let i=0;i<WIDTH;i++){const x=(i+.5)/RES-.5,y=(j+.5)/RES-.5;for(const[ax,ay,bx,by]of map.segments){const dx=bx-ax,dy=by-ay,t=E.clamp(((x-ax)*dx+(y-ay)*dy)/(dx*dx+dy*dy||1),0,1),ex=x-ax-t*dx,ey=y-ay-t*dy;if(ex*ex+ey*ey<=.33*.33){grid[j*WIDTH+i]=1;break;}}}
- fields.set(map,grid);return grid;
+ if(fields.has(map))return fields.get(map);const width=map.width*RES,height=map.height*RES,grid=new Uint8Array(width*height);
+ // Rasterize only each road segment's bounds, including on large custom maps.
+ for(const[ax,ay,bx,by]of map.segments){const dx=bx-ax,dy=by-ay,denom=dx*dx+dy*dy||1,x0=Math.max(0,Math.floor((Math.min(ax,bx)+.17)*RES)),x1=Math.min(width-1,Math.ceil((Math.max(ax,bx)+.83)*RES)),y0=Math.max(0,Math.floor((Math.min(ay,by)+.17)*RES)),y1=Math.min(height-1,Math.ceil((Math.max(ay,by)+.83)*RES));for(let j=y0;j<=y1;j++)for(let i=x0;i<=x1;i++){const x=(i+.5)/RES-.5,y=(j+.5)/RES-.5,t=E.clamp(((x-ax)*dx+(y-ay)*dy)/denom,0,1),ex=x-ax-t*dx,ey=y-ay-t*dy;if(ex*ex+ey*ey<=.33*.33)grid[j*width+i]=1;}}
+ const field={grid,width,height};fields.set(map,field);return field;
 }
 function sense(map,state,range=4){
- const grid=surface(map),rays=[],bridges=[...map.bridges].map(k=>k.split(',').map(Number));
+ const {grid,width,height}=surface(map),rays=[],bridges=[...map.bridges].map(k=>k.split(',').map(Number));
  for(const offset of OFFSETS){const angle=state.angle+offset,dx=Math.cos(angle),dy=Math.sin(angle);let distance=0,hit=false,lock=state.bridgeLock;
   for(let d=.04;d<=range+.001;d+=.04){const x=state.x+dx*d,y=state.y+dy*d,i=Math.floor((x+.5)*RES),j=Math.floor((y+.5)*RES);
-   let valid=i>=0&&i<WIDTH&&j>=0&&j<HEIGHT&&!!grid[j*WIDTH+i];
+   let valid=i>=0&&i<width&&j>=0&&j<height&&!!grid[j*width+i];
    if(!lock)for(const[bx,by]of bridges)if(Math.abs(x-bx)<.5&&Math.abs(y-by)<.5){lock={x:bx,y:by,axis:Math.abs(dx)>Math.abs(dy)?'h':'v'};break;}
    if(lock){if(Math.abs(x-lock.x)>.7||Math.abs(y-lock.y)>.7)lock=null;else if((lock.axis==='h'?Math.abs(y-lock.y):Math.abs(x-lock.x))>.33)valid=false;}
    if(!valid){hit=true;break;}distance=d;
