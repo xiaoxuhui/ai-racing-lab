@@ -9,6 +9,7 @@ const separate = E.makeMap(3,{width:10,height:8,roads:['2,2','3,2'],edges:[],bri
 assert.equal(separate.edges.size,0,'Adjacent road cells must stay separate without an explicit stroke');
 assert(!E.onRoad(separate,2.5,2),'Road geometry must not invent a connection between neighboring cells');
 assert(E.mapIssue(separate),'Reference reachability must respect missing road connections');
+assert.equal(E.drivingIssue(separate),'','Disconnected tracks must still allow attempts and retraining');
 assert(E.sense(separate,E.continuousInitial(separate)).rays[3].distance<.4,'Vision must see the gap instead of a made-up connector');
 const connected=E.makeMap(3,{...E.serializeMap(separate),edges:[E.edgeKey('2,2','3,2')]});
 assert(E.onRoad(connected,2.5,2));
@@ -20,6 +21,7 @@ assert.equal(clippedEdges.edges.length,1);
 const noEntry = E.makeMap(3, { ...E.serializeMap(map), start: null });
 assert.equal(noEntry.start, null);
 assert.match(E.mapIssue(noEntry), /入口/);
+assert.match(E.drivingIssue(noEntry), /入口/);
 assert.equal(E.serializeMap(noEntry).start, null);
 const noExit = E.makeMap(3, { ...E.serializeMap(map), goal: null });
 assert.equal(noExit.goal, null);
@@ -50,6 +52,11 @@ assert(car.x > 0 && car.x < .02);
 assert(car.speed > 1 && car.speed < 1.02);
 const coasting = E.advanceManual(map, car, { throttle: 0, brake: 0, steer: 0 }, 1 / 120, config);
 assert.equal(coasting.speed, car.speed);
+function driveFor(seconds,control){let s=E.continuousInitial(map);for(let i=0;i<Math.round(seconds*120);i++)s=E.advanceManual(map,s,control,1/120,config);return s;}
+const oneSecondCoast=driveFor(1,E.CONTROLS.straight),oneSecondGas=driveFor(1,E.CONTROLS.accelerate);
+assert(Math.abs(oneSecondCoast.distance-1)<1e-8);
+assert(Math.abs(oneSecondGas.distance-2)<1e-8,'Holding gas for one second must move two units, rather than merely changing the displayed speed');
+assert(oneSecondGas.x>oneSecondCoast.x*1.9);
 for (const steer of [-1, 1]) {
   const turned = E.advanceManual(map, { ...car, x: 4, y: 8, speed: 6 }, { throttle: 0, brake: 0, steer }, 1 / 120, config);
   assert(!turned.done, 'High speed must not prohibit turning');

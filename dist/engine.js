@@ -29,6 +29,7 @@
  }
  function serializeMap(map){return {width:map.width,height:map.height,roads:[...map.roads],edges:[...map.edges],bridges:[...map.bridges],start:map.start?[...map.start]:null,goal:map.goal?[...map.goal]:null,startDir:map.startDir};}
  function resizeMap(data,width,height){return serializeMap(makeMap(3,{...data,width,height}));}
+ function drivingIssue(map){if(!map.start)return '请放置入口';if(!map.goal)return '请放置出口';if(key(...map.start)===key(...map.goal))return '入口和出口需要放在不同位置';if(!map.roads.has(key(...map.start))||!map.roads.has(key(...map.goal)))return '请补齐入口与出口所在的道路';return '';}
  function mapIssue(map){if(!map.start)return '请放置入口';if(!map.goal)return '请放置出口';if(key(...map.start)===key(...map.goal))return '入口和出口需要放在不同位置';if(!map.roads.has(key(...map.start))||!map.roads.has(key(...map.goal)))return '请补齐入口与出口所在的道路';if(!map.dist.has(`${map.start[0]},${map.start[1]},${map.startDir}`))return '入口尚未连通出口，请补齐道路或调整入口朝向';for(const k of map.bridges){const[x,y]=k.split(',').map(Number);if(!DIRS.every(([dx,dy])=>map.edges.has(edgeKey(k,key(x+dx,y+dy)))))return '高架桥需连接四个方向的道路';}return '';}
  function initial(map){return {x:map?.start?.[0]??0,y:map?.start?.[1]??8,d:map?.startDir??0,v:1,steps:0,time:0,done:false,won:false,reason:'',action:'straight'};}
  function stateKey(s){return `${s.x},${s.y},${s.d},${s.v}`;}
@@ -59,5 +60,5 @@
   if(s.bridgeLock){const b=s.bridgeLock;if(Math.abs(s.x-b.x)>.7||Math.abs(s.y-b.y)>.7)s.bridgeLock=null;else if((b.axis==='h'?Math.abs(s.y-b.y):Math.abs(s.x-b.x))>.33){s.done=true;s.reason='碰到高架护栏';}}
   if(!onRoad(map,s.x,s.y)){s.done=true;s.reason='驶出道路';}if(Math.hypot(s.x-map.goal[0],s.y-map.goal[1])<.34){s.done=true;s.won=true;s.reason='成功抵达出口';}return s;
  }
- const api={DIRS,SPEEDS,ACTIONS,key,edgeKey,clamp,makeMap,serializeMap,resizeMap,mapIssue,initial,stateKey,transition,reference,smoothPath,onRoad,continuousInitial,advanceManual};root.Racing=api;if(typeof module!=='undefined')module.exports=api;
+ const api={DIRS,SPEEDS,ACTIONS,key,edgeKey,clamp,makeMap,serializeMap,resizeMap,mapIssue,drivingIssue,initial,stateKey,transition,reference,smoothPath,onRoad,continuousInitial,advanceManual};root.Racing=api;if(typeof module!=='undefined')module.exports=api;
 })(typeof window!=='undefined'?window:globalThis);

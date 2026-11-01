@@ -6,15 +6,17 @@ let config={color:'#d5ed99',style:'sport',maxSpeed:8,acceleration:2,steering:3,.
 let mapIndex=0,map,learner,state,mode='ai',running=false,training=false,editing=false,tool='road',draft=null,undo=[],editOrigin=0,paintPointer=null,lastCell=null,paintChanged=false,strokePainted=new Set();
 let routeVisible=false,trail=[],last=0,accumulator=0,toastTimer,storageAvailable=true,held=new Set(),pointers=new Map(),keys=new Set(),repeatDelay=0,renderClock=0;
 let observation=null,decision=null,decisionTicks=0,visited=new Set(),showVision=true,visionRange=4;
+let trainingTask=null,progressHideTimer=null;
+const latched=new Set(),pointerPresses=new Map();
 const physicalKeys=new Set();
 function persist(k,v){memory.set(k,v);try{localStorage.setItem(k,JSON.stringify(v));}catch{if(storageAvailable){storageAvailable=false;toast('存储不可用，设置暂时保留在本次页面中。');}}}
 function load(k,fallback=null){return memory.has(k)?memory.get(k):read(k,fallback);}
 function toast(msg){$('toast').textContent=msg;$('toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').classList.remove('show'),3000);}
 function save(){if(learner)persist('apex-vision-v3-'+mapIndex,learner.serialize());}
 function init(index){mapIndex=index;persist('apex-selected-map-v1',index);map=E.makeMap(index,index===3?load('apex-custom-track-v2'):null);learner=new E.VisionLearner(load('apex-vision-v3-'+index));$('mapSelect').value=index;reset();drawMap();stats();}
-function clearHeld(){held.clear();keys.clear();physicalKeys.clear();pointers.clear();document.querySelectorAll('[data-action]').forEach(b=>{b.classList.remove('pressed');b.setAttribute('aria-pressed','false');});}
-function reset(resume=false){running=resume&&!E.mapIssue(map);repeatDelay=0;accumulator=0;decision=null;decisionTicks=0;visited=new Set();learner.buffer=[];clearHeld();state=map.start&&map.goal?E.continuousInitial(map):null;observation=state?E.sense(map,state,visionRange):null;trail=state?[[state.x,state.y]]:[];$('result').classList.add('hidden');drawDynamic();update();}
-function ready(){const issue=E.mapIssue(map);if(issue){toast(issue+'，点「编辑 / 擦除」继续修改。');return false;}return true;}
+function clearHeld(){held.clear();keys.clear();physicalKeys.clear();pointers.clear();pointerPresses.clear();latched.clear();document.querySelectorAll('[data-action]').forEach(b=>{b.classList.remove('pressed');b.setAttribute('aria-pressed','false');});}
+function reset(resume=false){running=resume&&!E.drivingIssue(map);repeatDelay=0;accumulator=0;decision=null;decisionTicks=0;visited=new Set();learner.buffer=[];clearHeld();state=map.start&&map.goal?E.continuousInitial(map):null;observation=state?E.sense(map,state,visionRange):null;trail=state?[[state.x,state.y]]:[];$('result').classList.add('hidden');drawDynamic();update();}
+function ready(){const issue=E.drivingIssue(map);if(issue){toast(issue+'，点「编辑 / 擦除」继续修改。');return false;}return true;}
 function mapViewSize(){return {width:map.width*48+34,height:map.height*46+44};}
 function svg(tag,attrs={},parent){const n=document.createElementNS(NS,tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(parent)parent.appendChild(n);return n;}
 function label(parent,x,y,text,attrs={}){const n=svg('text',{x,y,'font-family':'DM Sans, Microsoft YaHei, sans-serif',...attrs},parent);n.textContent=text;return n;}
@@ -45,7 +47,7 @@ function drawMap(){
 }
 function drawReference(){const layer=$('routeLayer');if(!layer)return;layer.replaceChildren();if(!routeVisible||editing||E.mapIssue(map))return;const path=E.smoothPath(E.reference(map));if(path.length)svg('path',{d:pathFor(path.map(p=>[p.x,p.y])),fill:'none',stroke:'#dceeb3','stroke-width':3,'stroke-linecap':'round','stroke-dasharray':'2 7',opacity:.8},layer);}
 function drawEditorGrid(t){const g=svg('g',{'pointer-events':'none','data-editor-grid':'true'},t);for(let y=0;y<map.height;y++)for(let x=0;x<map.width;x++){const[cx,cy]=point(x,y);svg('rect',{x:cx-23.5,y:cy-22.5,width:47,height:45,fill:'transparent',stroke:'#b5c79c','stroke-width':.7,'stroke-dasharray':'2 4',opacity:.65},g);}}
-function drawDynamic(){
+function drawDynamic(refreshVision=true){
  const layer=$('carLayer'),tl=$('trailLayer');if(!layer)return;
  if(editing||!state){layer.replaceChildren();tl.replaceChildren();$('visionLayer')?.replaceChildren();if(!editing)drawVision();return;}
  let car=layer.firstElementChild;
@@ -58,7 +60,7 @@ function drawDynamic(){
  let under=false;for(const k of map.bridges){const[bx,by]=k.split(',').map(Number);if(Math.abs(state.x-bx)<.36&&Math.abs(state.y-by)<.32&&Math.abs(Math.sin(state.angle))>.7)under=true;}car.setAttribute('opacity',under?.32:1);
  const p=trail[trail.length-1];if(!p||Math.hypot(state.x-p[0],state.y-p[1])>.055){trail.push([state.x,state.y]);if(trail.length>1000)trail.shift();}
  if(!tl.firstElementChild)svg('path',{fill:'none',stroke:'#dbed9c','stroke-width':2.5,'stroke-linecap':'round','stroke-linejoin':'round',opacity:.85},tl);
- tl.firstElementChild.setAttribute('d',pathFor(trail));drawVision();
+ tl.firstElementChild.setAttribute('d',pathFor(trail));if(refreshVision)drawVision();
 }
 function drawVision(){
  const layer=$('visionLayer');if(!layer||editing)return;layer.replaceChildren();
@@ -80,8 +82,9 @@ function drawVision(){
 const actionNames={straight:['直行','→'],accelerate:['持续加速','↑'],decelerate:['持续减速','↓'],left:['持续左转','↰'],right:['持续右转','↱']};
 function update(){
  $('aiMode').classList.toggle('active',mode==='ai');$('manualMode').classList.toggle('active',mode==='manual');$('aiMode').setAttribute('aria-pressed',mode==='ai');$('manualMode').setAttribute('aria-pressed',mode==='manual');
- const issue=E.mapIssue(map);$('trackNotice').classList.toggle('hidden',editing||!issue);$('trackIssue').textContent=issue;
- $('start').disabled=training||editing||!!issue;$('train').disabled=editing||!!issue;$('routeToggle').disabled=editing||!!issue;document.querySelectorAll('[data-action]').forEach(b=>b.disabled=training||editing||!!issue);
+ const issue=E.drivingIssue(map),warning=E.mapIssue(map);$('trackNotice').classList.toggle('hidden',editing||!warning);$('trackIssue').textContent=warning+(!issue?'；仍可尝试驾驶和训练':'');
+ $('start').disabled=training||editing||!!issue;$('train').disabled=editing||!!issue||!!trainingTask?.stop;$('retrain').disabled=editing||!!issue;$('releaseControls').disabled=training||editing||!!issue;$('routeToggle').disabled=editing||!!warning;document.querySelectorAll('[data-action]').forEach(b=>b.disabled=training||editing||!!issue);
+ $('train').innerHTML=training?(trainingTask?.stop?'正在停止…':'Ⅱ 停止训练'):(learner.episodes?'✧ 继续训练 5,000 轮 <span>→</span>':'✧ 开始训练 5,000 轮 <span>→</span>');$('retrain').textContent=training?'↺ 停止并从零训练':'↺ 从零重新训练';$('trainingHint').textContent=issue?'无法开始：'+issue:'继续训练保留经验；从零重新训练会清空本赛道的 Q 表并立即训练。';
  if(!state){$('speed').innerHTML='— <small>格 / 秒</small>';$('elapsed').textContent='00:00.0';$('steps').innerHTML='0.00 <small>格</small>';$('action').textContent='等待设置';$('runStatus').textContent=editing?'正在编辑赛道':issue;$('coordinates').textContent='地图草稿 · '+map.width+' × '+map.height;$('start').textContent='请先补齐赛道';return;}$('speed').innerHTML=state.speed.toFixed(2)+' <small>格 / 秒</small>';
  const sec=state.time;$('elapsed').innerHTML=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(Math.floor(sec%60)).padStart(2,'0')+'<small>.'+Math.floor((sec%1)*10)+'</small>';
  $('steps').innerHTML=state.distance.toFixed(2)+' <small>格</small>';
@@ -90,8 +93,8 @@ function update(){
  $('runStatus').textContent=editing?'正在编辑赛道':training?'AI 正在学习':state.done?state.reason:running?'连续行驶中':state.time?'已暂停':'等待出发';
  $('coordinates').textContent=`位置 (${state.x.toFixed(2)}, ${state.y.toFixed(2)}) · 朝向 ${((state.angle*180/Math.PI%360+360)%360).toFixed(0)}°`;
  $('modeTitle').textContent=mode==='ai'?'训练你的赛车':'接管方向盘';
- $('modeDesc').textContent=mode==='ai'?'读取 7 条探测射线、车速和出口方位，用 Q 值选择油门、刹车与转向。需要反复试错，训练后也可能撞车。':'按住 WASD 或方向键持续控制，可同时加速和转向。松开后保持车速与方向。';
- $('actionHint').textContent=held.size?'正在持续执行：'+[...held].map(a=>actionNames[a][0]).join(' + '):'按住连续生效，松开恢复匀速直行。转弯不限速。';
+ $('modeDesc').textContent=mode==='ai'?'读取 7 条探测射线、车速和出口方位，用 Q 值选择油门、刹车与转向。需要反复试错，训练后也可能撞车。':'轻点按钮保持动作，再点一次松开；长按按钮或按住 WASD 也能连续控制，可组合操作。';
+ $('actionHint').textContent=held.size?'持续执行：'+[...held].map(a=>actionNames[a][0]).join(' + ')+(latched.size?' · 再点同一按钮或「松开全部」停止施加动作':''):'轻点保持动作，再点松开；长按与键盘松手后保持当前车速和方向。';
 }
 function stats(){
  const n=learner.episodes;$('episodes').innerHTML=n.toLocaleString()+' <small>轮</small>';const rate=learner.results.length?Math.round(100*learner.results.reduce((a,b)=>a+b,0)/learner.results.length):null;$('successRate').innerHTML=(rate??'—')+' <small>%</small>';$('bestTime').innerHTML=(learner.best===null?'—':learner.best.toFixed(1))+' <small>秒</small>';$('policyStatus').textContent=n?'已学习 '+n.toLocaleString()+' 轮':'尚未训练';
@@ -116,23 +119,28 @@ function advance(dt){
  if(state.done){const won=state.won,reason=state.reason;state.done=false;finish(won,reason);}
 }
 function frame(now){
- const elapsed=last?Math.min((now-last)/1000,.15):0;last=now;
+ const elapsed=last?Math.min((now-last)/1000,1):0;last=now;
  if(running&&!training&&!editing){
   if(state.done){repeatDelay-=elapsed;if(repeatDelay<=0){if($('autoRepeat').checked)reset(true);else{running=false;update();}}}
   else{accumulator+=elapsed;while(accumulator>=1/120&&!state.done){advance(1/120);accumulator-=1/120;}}
-  drawDynamic();renderClock+=elapsed;if(renderClock>.06){renderClock=0;update();}
+  drawDynamic(false);renderClock+=elapsed;if(renderClock>1/15){renderClock=0;update();drawVision();}
  }
  requestAnimationFrame(frame);
 }
-function start(){if(training||editing||!ready())return;if(state.done)reset();running=!running;accumulator=0;clearHeld();update();}
+function start(){if(training||editing||!ready())return;if(state.done)reset();running=!running;accumulator=0;if(running)last=performance.now();clearHeld();update();}
 function setMode(next){if(training||editing||mode===next)return;mode=next;if(next==='ai'){reset(running);toast('已切换视野 AI，从入口开始观察和驾驶。');}else{decision=null;learner.buffer=[];clearHeld();update();}}
-function refreshHeld(){held=new Set([...keys,...pointers.values()]);document.querySelectorAll('[data-action]').forEach(b=>{const on=held.has(b.dataset.action);b.classList.toggle('pressed',on);b.setAttribute('aria-pressed',on);});update();}
-function takeControl(){if(training||editing||!ready())return false;if(state.done)reset();if(mode==='ai'){mode='manual';decision=null;learner.buffer=[];}running=true;update();return true;}
+function refreshHeld(){held=new Set([...keys,...pointers.values(),...latched]);document.querySelectorAll('[data-action]').forEach(b=>{const on=held.has(b.dataset.action);b.classList.toggle('pressed',on);b.setAttribute('aria-pressed',on);});update();}
+function clearOpposite(a){latched.delete(({accelerate:'decelerate',decelerate:'accelerate',left:'right',right:'left'})[a]);}
+function takeControl(){if(training||editing||!ready())return false;if(state.done)reset();if(mode==='ai'){mode='manual';decision=null;learner.buffer=[];}if(!running){last=performance.now();accumulator=0;}running=true;update();return true;}
 function locked(v){for(const id of ['mapSelect','start','reset','clearTraining','editTrack','aiMode','manualMode'])$(id).disabled=v;document.querySelectorAll('[data-action]').forEach(b=>b.disabled=v);}
-async function train(){
- if(training){training=false;return;}if(editing||!ready())return;running=false;clearHeld();training=true;locked(true);$('trainingProgress').classList.remove('hidden');$('train').textContent='Ⅱ 停止训练';let count=0;const epsilon=Number($('exploration').value)/100;update();
- try{while(count<5000&&training){const start=performance.now();do{learner.episode(map,config,Math.max(.03,epsilon/(1+learner.episodes/2000)),visionRange);count++;}while(count<5000&&performance.now()-start<12);$('progressBar').style.width=count/50+'%';$('progressText').textContent=`已训练 ${count.toLocaleString()} / 5,000 轮`;stats();await new Promise(r=>setTimeout(r,0));}}
- finally{training=false;locked(false);$('train').innerHTML='✧ 训练 5,000 轮 <span>→</span>';save();reset();stats();toast(`完成 ${count.toLocaleString()} 轮视野驾驶训练，可继续训练或观察驾驶。`);setTimeout(()=>$('trainingProgress').classList.add('hidden'),1800);}
+async function train(fresh=false){
+ if(trainingTask){trainingTask.stop=true;trainingTask.restart=trainingTask.restart||fresh;update();return;}
+ if(editing||!ready())return;
+ running=false;mode='ai';decision=null;clearHeld();if(fresh){learner=new E.VisionLearner();save();stats();}
+ const job={stop:false,restart:false};trainingTask=job;training=true;learner.buffer=[];locked(true);clearTimeout(progressHideTimer);$('trainingProgress').classList.remove('hidden');$('progressBar').style.width='0%';$('progressText').textContent=fresh?'已清空经验，从零开始…':'准备继续训练…';let count=0,failed=false;const epsilon=Number($('exploration').value)/100;update();
+ try{while(count<5000&&!job.stop){const started=performance.now();do{learner.episode(map,config,Math.max(.03,epsilon/(1+learner.episodes/2000)),visionRange);count++;}while(count<5000&&performance.now()-started<12);$('progressBar').style.width=count/50+'%';$('progressText').textContent=`本次 ${count.toLocaleString()} / 5,000 轮 · 累计 ${learner.episodes.toLocaleString()} 轮`;stats();await new Promise(r=>setTimeout(r,0));}}
+ catch(error){failed=true;toast('训练中断：'+error.message);}
+ finally{training=false;trainingTask=null;locked(false);save();reset();stats();if(job.restart){void train(true);}else{if(!failed)toast(`${job.stop?'已停止，保留':'本次完成'} ${count.toLocaleString()} 轮训练；可继续训练或从零重训。`);progressHideTimer=setTimeout(()=>$('trainingProgress').classList.add('hidden'),1800);}}
 }
 function beginEditor(){
  if(training)return;save();running=false;clearHeld();editing=true;editOrigin=mapIndex;draft=E.serializeMap(map);undo=[];paintPointer=null;
@@ -146,7 +154,7 @@ function endEditor(saveChanges){
   if(!applyDraftSize())return;
   persist('apex-custom-track-v2',draft);persist('apex-vision-v3-3',null);
  }
- editing=false;paintPointer=null;draft=null;undo=[];$('editor').classList.add('hidden');document.querySelector('.track-panel').classList.remove('editing');locked(false);$('train').disabled=false;init(saveChanges?3:editOrigin);if(saveChanges)toast(E.mapIssue(map)?'地图草稿已保存；补齐入口、出口和道路后即可驾驶。':'自定义赛道已保存，可以开始驾驶或训练。');
+ editing=false;paintPointer=null;draft=null;undo=[];$('editor').classList.add('hidden');document.querySelector('.track-panel').classList.remove('editing');locked(false);$('train').disabled=false;init(saveChanges?3:editOrigin);if(saveChanges)toast(E.drivingIssue(map)?'地图草稿已保存；放好入口和出口后即可尝试。':E.mapIssue(map)?'赛道已保存；道路未完全连通，仍可尝试驾驶和训练。':'自定义赛道已保存，可以开始驾驶或训练。');
 }
 function gridCell(e){const t=$('track'),matrix=t.getScreenCTM();if(!matrix)return null;const p=t.createSVGPoint();p.x=e.clientX;p.y=e.clientY;const local=p.matrixTransform(matrix.inverse()),x=Math.round((local.x-41)/48),y=Math.round((local.y-39)/46);return x>=0&&x<map.width&&y>=0&&y<map.height?[x,y]:null;}
 function paintCell(x,y){
@@ -174,18 +182,17 @@ $('fixMap').onclick=beginEditor;
 function applyDraftSize(){if(!editing)return false;if(!$('mapWidth').reportValidity()||!$('mapHeight').reportValidity())return false;const width=Number($('mapWidth').value),height=Number($('mapHeight').value);if(width===draft.width&&height===draft.height)return true;undo.push(JSON.stringify(draft));draft=E.resizeMap(draft,width,height);rebuildDraft();$('editorHint').textContent=`已调整为 ${draft.width} 列 × ${draft.height} 行；边界外的内容已裁掉，可撤销恢复。`;return true;}
 $('applySize').onclick=applyDraftSize;
 for(const [id,field]of [['removeStart','start'],['removeGoal','goal']])$(id).onclick=()=>{if(!editing||!draft[field])return;undo.push(JSON.stringify(draft));draft[field]=null;rebuildDraft();$('editorHint').textContent=field==='start'?'入口已擦除。选择「入口」后点击新位置，或先保存草稿。':'出口已擦除。选择「出口」后点击新位置，或先保存草稿。';};
-$('start').onclick=start;$('reset').onclick=()=>{if(!training&&!editing)reset();};$('train').onclick=train;
+$('start').onclick=start;$('reset').onclick=()=>{if(!training&&!editing)reset();};$('train').onclick=()=>train(false);$('retrain').onclick=()=>train(true);$('releaseControls').onclick=()=>{clearHeld();refreshHeld();};
 $('aiMode').onclick=()=>setMode('ai');$('manualMode').onclick=()=>setMode('manual');
 document.querySelectorAll('[data-action]').forEach(b=>{
- b.addEventListener('pointerdown',e=>{if(e.button>0||!takeControl())return;e.preventDefault();b.setPointerCapture(e.pointerId);pointers.set(e.pointerId,b.dataset.action);refreshHeld();});
- const release=e=>{pointers.delete(e.pointerId);refreshHeld();};b.addEventListener('pointerup',release);b.addEventListener('pointercancel',release);b.addEventListener('lostpointercapture',release);
- b.addEventListener('keydown',e=>{if((e.key===' '||e.key==='Enter')&&!e.repeat){e.preventDefault();if(takeControl()){keys.add(b.dataset.action);refreshHeld();}}});
- b.addEventListener('keyup',e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();keys.delete(b.dataset.action);refreshHeld();}});
+ b.addEventListener('pointerdown',e=>{if(e.button>0||!takeControl())return;e.preventDefault();const a=b.dataset.action,wasLatched=latched.has(a);latched.delete(a);clearOpposite(a);pointerPresses.set(e.pointerId,{a,wasLatched,at:performance.now()});b.setPointerCapture(e.pointerId);pointers.set(e.pointerId,a);refreshHeld();});
+ const release=e=>{const press=pointerPresses.get(e.pointerId);if(press&&e.type==='pointerup'&&performance.now()-press.at<250&&!press.wasLatched){clearOpposite(press.a);latched.add(press.a);}pointerPresses.delete(e.pointerId);pointers.delete(e.pointerId);refreshHeld();};b.addEventListener('pointerup',release);b.addEventListener('pointercancel',release);b.addEventListener('lostpointercapture',release);
+ b.addEventListener('click',e=>{if(e.detail!==0||!takeControl())return;const a=b.dataset.action;if(latched.has(a))latched.delete(a);else{clearOpposite(a);latched.add(a);}refreshHeld();});
 });
 const keyActions={w:'accelerate',s:'decelerate',a:'left',d:'right',arrowup:'accelerate',arrowdown:'decelerate',arrowleft:'left',arrowright:'right'};
 window.addEventListener('keydown',e=>{
  if($('helpDialog').open||/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)||e.ctrlKey||e.metaKey||e.altKey)return;const k=e.key.toLowerCase();
- if(keyActions[k]){e.preventDefault();if(e.repeat||!takeControl())return;physicalKeys.add(k);keys=new Set([...physicalKeys].map(k=>keyActions[k]));refreshHeld();}
+ if(keyActions[k]){e.preventDefault();if(e.repeat||!takeControl())return;clearOpposite(keyActions[k]);latched.delete(keyActions[k]);physicalKeys.add(k);keys=new Set([...physicalKeys].map(k=>keyActions[k]));refreshHeld();}
  else if(k===' '&&!e.repeat&&e.target.tagName!=='BUTTON'){e.preventDefault();start();}else if(k==='r'&&!e.repeat&&!editing&&!training)reset();
 });
 window.addEventListener('keyup',e=>{const k=e.key.toLowerCase();if(keyActions[k]){physicalKeys.delete(k);keys=new Set([...physicalKeys].map(k=>keyActions[k]));refreshHeld();}});
