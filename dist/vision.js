@@ -29,13 +29,12 @@ function sense(map,state,range=4,vehicles=[]){
  return {rays,range,speed:state.speed,goalBearing:Math.atan2(Math.sin(a),Math.cos(a)),goalDistance:Math.hypot(map.goal[0]-state.x,map.goal[1]-state.y)};
 }
 function observationKey(o){const bin=v=>v<.25?0:v<.65?1:2;const base=o.rays.map(r=>bin(r.distance)).join('')+':'+Math.floor((o.goalBearing+Math.PI)/(Math.PI/4))%8+':'+(o.speed<.2?0:o.speed<.8?1:o.speed<1.6?2:o.speed<3?3:4),traffic=o.rays.reduce((mask,r,i)=>r.kind==='car'?mask|(1<<i):mask,0);return base+(traffic?':cars'+traffic:'');}
-function rewardFor(map,before,after,visited,observation=null){
- const waitingForCar=!!observation?.rays.some((ray,i)=>ray.kind==='car'&&((i===3&&ray.distance<1)||((i===2||i===4)&&ray.distance<.45)));
- after.idleTime=after.speed<.18&&!waitingForCar?(before.idleTime||0)+(after.time-before.time):0;
+function rewardFor(map,before,after,visited){
+ after.idleTime=after.speed<.18?(before.idleTime||0)+(after.time-before.time):0;
  if(!after.done&&after.idleTime>=2){after.done=true;after.reason='停车过久，重新尝试';}
  if(!after.done&&after.time>=45){after.done=true;after.reason='本轮达到 45 秒，继续训练再试';}
  const old=Math.hypot(before.x-map.goal[0],before.y-map.goal[1]),dist=Math.hypot(after.x-map.goal[0],after.y-map.goal[1]);
- let reward=3*(old-dist)-.018-(after.speed<.18&&!waitingForCar?.1:0);
+ let reward=3*(old-dist)-.018-(after.speed<.18?.1:0);
  const cell=Math.floor(after.x*2)+','+Math.floor(after.y*2);if(!visited.has(cell)){visited.add(cell);reward+=.08;}
  if(after.done)reward+=after.won?80:after.time>=45?-5:-15;
  return reward;

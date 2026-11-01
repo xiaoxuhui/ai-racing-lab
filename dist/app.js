@@ -12,6 +12,7 @@ let angleBeforeDrag=null;
 let fleet=null,selectedCar=0,fleetCount=Number(load('apex-fleet-count-v1',8));
 if(![1,4,8,12,16].includes(fleetCount))fleetCount=8;
 const fleetColors=['#edb374','#8fbdd5','#c2a7d8','#ef978f','#94c7b8','#d9ca83','#a3bde8'];
+let showTrails=!!load('apex-show-trails-v1',true),showDeaths=!!load('apex-show-deaths-v1',true);
 const physicalKeys=new Set();
 function persist(k,v){memory.set(k,v);try{localStorage.setItem(k,JSON.stringify(v));}catch{if(storageAvailable){storageAvailable=false;toast('存储不可用，设置暂时保留在本次页面中。');}}}
 function load(k,fallback=null){return memory.has(k)?memory.get(k):read(k,fallback);}
@@ -19,7 +20,7 @@ function toast(msg){$('toast').textContent=msg;$('toast').classList.add('show');
 function save(){if(learner)persist('apex-vision-v3-'+mapIndex,learner.serialize());}
 function init(index){mapIndex=index;persist('apex-selected-map-v1',index);map=E.makeMap(index,index===3?load('apex-custom-track-v2'):null);learner=new E.VisionLearner(load('apex-vision-v3-'+index));$('mapSelect').value=index;reset();drawMap();stats();}
 function clearHeld(){held.clear();keys.clear();physicalKeys.clear();pointers.clear();pointerPresses.clear();latched.clear();document.querySelectorAll('[data-action]').forEach(b=>{b.classList.remove('pressed');b.setAttribute('aria-pressed','false');});}
-function reset(resume=false){running=resume&&!E.drivingIssue(map);accumulator=0;learner.buffer=[];clearHeld();fleet=E.drivingIssue(map)?null:new E.FleetWorld(map,learner,config,fleetCount,visionRange);selectedCar=E.clamp(selectedCar,0,fleetCount-1);syncSelected();syncFleetSelector();observation=state?E.sense(map,state,visionRange,fleet.states()):null;$('result').classList.add('hidden');drawDynamic();update();}
+function reset(resume=false){running=resume&&!E.drivingIssue(map);accumulator=0;learner.buffer=[];clearHeld();fleet=E.drivingIssue(map)?null:new E.FleetWorld(map,learner,config,fleetCount,visionRange);selectedCar=E.clamp(selectedCar,0,fleetCount-1);syncSelected();syncFleetSelector();observation=state?E.sense(map,state,visionRange,fleet.states()):null;$('trailLayer')?.replaceChildren();$('deathLayer')?.replaceChildren();$('result').classList.add('hidden');drawDynamic();update();}
 function syncSelected(){const c=fleet?.cars[selectedCar];state=c?.state??null;trail=c?.trail??[];}
 function carColor(id){return config.colors?.[id]||(id===0?config.color:fleetColors[(id-1)%fleetColors.length]);}
 function syncFleetSelector(){const select=$('observedCar');select.replaceChildren();for(let i=0;i<fleetCount;i++){const option=document.createElement('option');option.value=i;option.textContent=String(i+1).padStart(2,'0')+' 号';select.appendChild(option);}select.value=selectedCar;$('fleetCount').value=fleetCount;$('carColor').value=carColor(selectedCar);}
@@ -51,13 +52,13 @@ function drawMap(){
  if(map.goal){const[gx,gy]=point(...map.goal),g=svg('g',{'data-marker':'goal'},t);svg('rect',{x:gx-11,y:gy-17,width:23,height:34,rx:1,fill:'url(#checker)',stroke:'#8b9d77','stroke-width':1},g);label(g,gx-10,gy-29,'出口',{fill:'#697e56','font-size':9});}
  label(t,78,77,'APEX TESTING GROUNDS',{'font-size':9,fill:'#a3af94','letter-spacing':2});label(t,78,92,['OVERPASS CIRCUIT','URBAN CROSSROADS','THE LOOP','YOUR OWN CIRCUIT'][mapIndex],{'font-size':7,fill:'#b0baa3','letter-spacing':1.7});
  const compass=svg('g',{transform:`translate(${view.width-75} ${view.height-85})`},t);svg('circle',{r:20,fill:'none',stroke:'#cbd5be'},compass);svg('path',{d:'M0 -12L5 7L0 4L-5 7Z',fill:'#98a989'},compass);label(compass,0,-27,'N',{'text-anchor':'middle',fill:'#8b9e77','font-size':8});
- svg('g',{id:'trailLayer'},t);svg('g',{id:'visionLayer','pointer-events':'none'},t);svg('g',{id:'carLayer'},t);if(editing)drawEditorGrid(t);drawReference();drawDynamic();
+ svg('g',{id:'trailLayer','pointer-events':'none'},t);svg('g',{id:'deathLayer'},t);svg('g',{id:'visionLayer','pointer-events':'none'},t);svg('g',{id:'carLayer'},t);if(editing)drawEditorGrid(t);drawReference();drawDynamic();
 }
 function drawReference(){const layer=$('routeLayer');if(!layer)return;layer.replaceChildren();if(!routeVisible||editing||E.mapIssue(map))return;const path=E.smoothPath(E.reference(map));if(path.length)svg('path',{d:pathFor(path.map(p=>[p.x,p.y])),fill:'none',stroke:'#dceeb3','stroke-width':3,'stroke-linecap':'round','stroke-dasharray':'2 7',opacity:.8},layer);}
 function drawEditorGrid(t){const g=svg('g',{'pointer-events':'none','data-editor-grid':'true'},t);for(let y=0;y<map.height;y++)for(let x=0;x<map.width;x++){const[cx,cy]=point(x,y);svg('rect',{x:cx-23.5,y:cy-22.5,width:47,height:45,fill:'transparent',stroke:'#b5c79c','stroke-width':.7,'stroke-dasharray':'2 4',opacity:.65},g);}}
 function drawDynamic(refreshVision=true){
  const layer=$('carLayer'),tl=$('trailLayer');if(!layer)return;
- if(editing||!state||!fleet){layer.replaceChildren();tl.replaceChildren();$('visionLayer')?.replaceChildren();if(!editing)drawVision();return;}
+ if(editing||!state||!fleet){layer.replaceChildren();tl.replaceChildren();$('deathLayer')?.replaceChildren();$('visionLayer')?.replaceChildren();if(!editing)drawVision();return;}
  const visible=new Set();
  for(const vehicle of fleet.cars){
   if(!vehicle.active&&!(vehicle.finished&&fleet.time-vehicle.finishedAt<.45))continue;
@@ -77,8 +78,33 @@ function drawDynamic(refreshVision=true){
   let under=false;for(const k of map.bridges){const[bx,by]=k.split(',').map(Number);if(Math.abs(s.x-bx)<.36&&Math.abs(s.y-by)<.32&&Math.abs(Math.sin(s.angle))>.7)under=true;}car.setAttribute('opacity',s.done?.35:under?.35:1);
  }
  for(const node of [...layer.children])if(!visible.has(node.dataset.carId))node.remove();
- if(!tl.firstElementChild)svg('path',{fill:'none',stroke:carColor(selectedCar),'stroke-width':2.5,'stroke-linecap':'round','stroke-linejoin':'round',opacity:.7},tl);
- tl.firstElementChild.setAttribute('stroke',carColor(selectedCar));tl.firstElementChild.setAttribute('d',pathFor(trail));if(refreshVision)drawVision();
+ drawFleetHistory();if(refreshVision)drawVision();
+}
+function drawFleetHistory(){
+ const layer=$('trailLayer'),deaths=$('deathLayer');if(!layer||!deaths||!fleet||editing)return;const keep=new Set(),marks=new Set();
+ for(const car of fleet.cars){
+  const color=carColor(car.id),chosen=car.id===selectedCar;
+  for(const type of ['live','death']){
+   const record=type==='death'?car.lastDeath:null,points=type==='death'?record?.trail:((car.active||car.state.won)?car.trail:null);if(!showTrails||!points||points.length<2)continue;
+   const key=car.id+'-'+type,version=type==='death'?record.version:car.trailVersion;keep.add(key);let path=layer.querySelector(`[data-trail-key="${key}"]`);
+   if(!path)path=svg('path',{'data-trail-key':key,'data-trail-car':car.id,'data-trail-type':type,fill:'none','stroke-linecap':'round','stroke-linejoin':'round'},layer);
+   if(path.dataset.version!==String(version)){path.setAttribute('d',pathFor(points));path.dataset.version=version;}
+   path.setAttribute('stroke',color);path.setAttribute('stroke-width',chosen?2.8:1.8);path.setAttribute('opacity',type==='death'?(chosen?.8:.4):(chosen?.95:.6));path.setAttribute('stroke-dasharray',type==='death'?'4 4':'none');
+  }
+  if(showDeaths&&car.lastDeath){
+   const d=car.lastDeath;marks.add(String(car.id));let mark=deaths.querySelector(`[data-death-car="${car.id}"]`);
+   if(mark&&mark.dataset.version!==String(d.version)){mark.remove();mark=null;}
+   if(!mark){const[x,y]=point(d.state.x,d.state.y);mark=svg('g',{'data-death-car':car.id,'data-version':d.version,transform:`translate(${x} ${y})`,role:'button','aria-label':`${car.id+1} 号第 ${d.attempt} 轮死亡：${d.state.reason}`},deaths);const title=svg('title',{},mark);title.textContent=`${String(car.id+1).padStart(2,'0')} 号 · 第 ${d.attempt} 轮 · ${d.state.reason} · ${d.state.time.toFixed(1)} 秒`;svg('circle',{r:10,fill:'#fff8ef',stroke:color,'stroke-width':1.4,opacity:.9},mark);svg('path',{d:'M-4 -4L4 4M4 -4L-4 4',stroke:'#b6725e','stroke-width':1.8,'stroke-linecap':'round'},mark);label(mark,0,-15,String(car.id+1).padStart(2,'0')+' ×',{'text-anchor':'middle','font-size':8,fill:color,stroke:'#fffef5','stroke-width':2,'paint-order':'stroke'});mark.addEventListener('click',event=>{event.stopPropagation();selectCar(car.id);});}
+   mark.setAttribute('opacity',chosen?1:.78);
+  }
+ }
+ for(const path of [...layer.children])if(!keep.has(path.dataset.trailKey))path.remove();for(const mark of [...deaths.children])if(!marks.has(mark.dataset.deathCar))mark.remove();
+ for(const path of [...layer.querySelectorAll(`[data-trail-car="${selectedCar}"]`)])layer.appendChild(path);
+ const selectedMark=deaths.querySelector(`[data-death-car="${selectedCar}"]`);if(selectedMark)deaths.appendChild(selectedMark);
+}
+function updateCarRecords(){
+ const list=$('carRecords');if(!list)return;const count=fleet?.cars.length||0;if(list.children.length!==count){list.replaceChildren();for(const car of fleet?.cars||[]){const row=document.createElement('button');row.className='car-record';row.dataset.recordCar=car.id;row.addEventListener('click',()=>selectCar(car.id));const id=document.createElement('b');id.textContent=String(car.id+1).padStart(2,'0')+' 号';const status=document.createElement('span');status.className='car-record-status';const death=document.createElement('small');death.className='car-record-death';row.append(id,status,death);list.appendChild(row);}}
+ for(const car of fleet?.cars||[]){const row=list.children[car.id];row.style.setProperty('--car-color',carColor(car.id));row.classList.toggle('selected',car.id===selectedCar);row.querySelector('.car-record-status').textContent=(car.active?'行驶 ':car.waiting?'待发 ':car.state.won?'已通关 ':'已死亡 ')+car.state.time.toFixed(1)+' s';const d=car.lastDeath;row.querySelector('.car-record-death').textContent=d?`上次死亡 · 第 ${d.attempt} 轮 · ${d.state.reason} · ${d.state.time.toFixed(1)} s`:'尚无死亡记录';}
 }
 function drawVision(){
  const layer=$('visionLayer');if(!layer||editing)return;layer.replaceChildren();
@@ -102,7 +128,7 @@ function drawVision(){
 const actionNames={straight:['直行','→'],accelerate:['持续加速','↑'],decelerate:['持续减速','↓'],left:['持续左转','↰'],right:['持续右转','↱']};
 function update(){
  updateSurvival();
- const active=fleet?.cars.filter(c=>c.active).length||0,waiting=fleet?.cars.filter(c=>c.waiting).length||0;$('fleetStatus').textContent=`在场 ${active} · 等候 ${waiting} · 碰撞 ${fleet?.collisions||0}`;$('agentBadge').textContent='CAR '+String(selectedCar+1).padStart(2,'0');$('fleetCount').disabled=training||editing;$('observedCar').disabled=editing||!fleet;
+ const active=fleet?.cars.filter(c=>c.active).length||0,waiting=fleet?.cars.filter(c=>c.waiting).length||0;$('fleetStatus').textContent=`在场 ${active} · 等候 ${waiting} · 死亡 ${fleet?.deaths||0}`;$('agentBadge').textContent='CAR '+String(selectedCar+1).padStart(2,'0');$('fleetCount').disabled=training||editing;$('observedCar').disabled=editing||!fleet;$('clearTraces').disabled=training||editing||!fleet;updateCarRecords();
  if(fleet)for(const c of fleet.cars){const option=$('observedCar').options[c.id],text=String(c.id+1).padStart(2,'0')+' 号 · '+(c.active?'行驶':c.waiting?'待发':c.state.won?'已通关':'已结束');if(option&&option.textContent!==text)option.textContent=text;}
  $('aiMode').classList.toggle('active',mode==='ai');$('manualMode').classList.toggle('active',mode==='manual');$('aiMode').setAttribute('aria-pressed',mode==='ai');$('manualMode').setAttribute('aria-pressed',mode==='manual');
  const issue=E.drivingIssue(map),warning=E.mapIssue(map);$('trackNotice').classList.toggle('hidden',editing||!warning);$('trackIssue').textContent=warning+(!issue?'；仍可尝试驾驶和训练':'');
@@ -113,7 +139,7 @@ function update(){
  $('steps').innerHTML=state.distance.toFixed(2)+' <small>格</small>';
  const an=actionNames[state.action]||actionNames.straight;$('action').innerHTML=(state.time?an[0]:'等待指令')+' <span>'+an[1]+'</span>';
  $('start').innerHTML=running?'Ⅱ 暂停车队':fleet?.allFinished?'↺ 车队再跑一轮':'<span>▶</span> '+(state.time?'继续车队驾驶':mode==='ai'?'开始实时车队训练':'开始车队驾驶');
- $('runStatus').textContent=editing?'正在编辑赛道':training?'车队正在加速训练':fleet?.cars[selectedCar].waiting?'所选赛车等待入口空位':state.done?state.reason:running?'车队连续行驶中':state.time?'已暂停':'等待车队出发';
+ $('runStatus').textContent=editing?'正在编辑赛道':training?'车队正在加速训练':fleet?.cars[selectedCar].waiting?'所选赛车排队出发':state.done?state.reason:running?'车队连续行驶中':state.time?'已暂停':'等待车队出发';
  $('coordinates').textContent=`位置 (${state.x.toFixed(2)}, ${state.y.toFixed(2)}) · 朝向 ${((state.angle*180/Math.PI%360+360)%360).toFixed(0)}°`;
  $('modeTitle').textContent=mode==='ai'?'训练你的赛车':'接管方向盘';
  $('modeDesc').textContent=mode==='ai'?`${fleetCount} 辆车在同一赛道同时学习，共享 Q 表。蓝色射线表示探测到其他车辆。`:`你正在接管 ${String(selectedCar+1).padStart(2,'0')} 号车，其余赛车继续自动学习。轻点保持动作，再点松开。`;
@@ -161,7 +187,7 @@ async function train(fresh=false){
  const startingEpisodes=learner.episodes;
  try{while(count<5000&&!job.stop){const started=performance.now();do{fleet.step(1/120,{epsilon:Math.max(.03,epsilon/(1+learner.episodes/2000)),repeat:true});count=learner.episodes-startingEpisodes;}while(count<5000&&performance.now()-started<12);syncSelected();handleFleetEvents(false);$('progressBar').style.width=Math.min(100,count/50)+'%';$('progressText').textContent=`${fleetCount} 辆并行 · 本次 ${count.toLocaleString()} / 5,000 轮 · 累计 ${learner.episodes.toLocaleString()} 轮`;drawDynamic(false);update();stats();await new Promise(r=>setTimeout(r,0));}}
  catch(error){failed=true;toast('训练中断：'+error.message);}
- finally{training=false;trainingTask=null;locked(false);save();reset();stats();if(job.restart){void train(true);}else{if(!failed)toast(`${job.stop?'已停止，保留':'本次完成'} ${count.toLocaleString()} 轮训练；可继续训练或从零重训。`);progressHideTimer=setTimeout(()=>$('trainingProgress').classList.add('hidden'),1800);}}
+ finally{training=false;trainingTask=null;locked(false);save();running=false;accumulator=0;clearHeld();syncSelected();drawDynamic();update();stats();if(job.restart){void train(true);}else{if(!failed)toast(`${job.stop?'已停止，保留':'本次完成'} ${count.toLocaleString()} 轮训练；可继续训练或从零重训。`);progressHideTimer=setTimeout(()=>$('trainingProgress').classList.add('hidden'),1800);}}
 }
 function beginEditor(){
  if(training)return;save();running=false;clearHeld();editing=true;editOrigin=mapIndex;draft=E.serializeMap(map);undo=[];paintPointer=null;angleBeforeDrag=null;
@@ -236,5 +262,6 @@ $('autoConnect').checked=!!load('apex-road-autoconnect-v1',false);$('autoConnect
 $('visionToggle').onchange=e=>{showVision=e.target.checked;drawVision();};
 $('visionRange').oninput=e=>{visionRange=Number(e.target.value);$('visionRangeValue').textContent=visionRange;if(fleet){fleet.range=visionRange;for(const car of fleet.cars){car.decision=null;car.buffer=[];}}drawVision();};
 $('fleetCount').onchange=e=>{if(training||editing)return;save();fleetCount=Number(e.target.value);persist('apex-fleet-count-v1',fleetCount);reset();stats();e.target.blur();toast(`已切换为 ${fleetCount} 辆赛车，学习经验保留。`);};$('observedCar').onchange=e=>{selectCar(Number(e.target.value));e.target.blur();};
+$('showTrails').checked=showTrails;$('showTrails').onchange=e=>{showTrails=e.target.checked;persist('apex-show-trails-v1',showTrails);drawDynamic();};$('showDeaths').checked=showDeaths;$('showDeaths').onchange=e=>{showDeaths=e.target.checked;persist('apex-show-deaths-v1',showDeaths);drawDynamic();};$('clearTraces').onclick=()=>{if(!fleet||training||editing)return;fleet.clearHistory();drawDynamic();update();toast('已清除画面轨迹和死亡标记，学习经验保留。');};
 window.addEventListener('beforeunload',save);const selectedMap=load('apex-selected-map-v1',0);init(Number.isInteger(selectedMap)&&selectedMap>=0&&selectedMap<=3?selectedMap:0);requestAnimationFrame(frame);
 })();
