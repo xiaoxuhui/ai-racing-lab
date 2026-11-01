@@ -8,6 +8,7 @@ let routeVisible=false,trail=[],last=0,accumulator=0,toastTimer,storageAvailable
 let observation=null,decision=null,decisionTicks=0,visited=new Set(),showVision=true,visionRange=4;
 let trainingTask=null,progressHideTimer=null;
 const latched=new Set(),pointerPresses=new Map();
+let angleBeforeDrag=null;
 const physicalKeys=new Set();
 function persist(k,v){memory.set(k,v);try{localStorage.setItem(k,JSON.stringify(v));}catch{if(storageAvailable){storageAvailable=false;toast('存储不可用，设置暂时保留在本次页面中。');}}}
 function load(k,fallback=null){return memory.has(k)?memory.get(k):read(k,fallback);}
@@ -39,7 +40,7 @@ function drawMap(){
  const routeLayer=svg('g',{id:'routeLayer'},t);
  const bridgeLayer=svg('g',{},t);
  for(const k of map.bridges){const[x,y]=k.split(',').map(Number),[cx,cy]=point(x,y);svg('rect',{x:cx-57,y:cy-19,width:114,height:42,rx:3,fill:'#4f6346',opacity:.27},bridgeLayer);svg('rect',{x:cx-60,y:cy-17,width:120,height:34,rx:2,fill:'#93a081'},bridgeLayer);svg('path',{d:`M${cx-59} ${cy-17}h118 M${cx-59} ${cy+17}h118`,stroke:'#c8d2b7','stroke-width':4},bridgeLayer);svg('path',{d:`M${cx-58} ${cy}h116`,stroke:'#d5dfc1','stroke-width':1.3,'stroke-dasharray':'5 8'},bridgeLayer);label(t,cx-37,cy-29,'高架桥 · 上层',{fill:'#7b8c67','font-size':8,'letter-spacing':.6});}
- if(map.start){const[sx,sy]=point(...map.start),g=svg('g',{'data-marker':'start'},t);svg('rect',{x:sx-17,y:sy-17,width:34,height:34,rx:7,fill:'#d9edb1',stroke:'#aac783','stroke-width':1.5},g);label(g,sx,sy+4,['→','↓','←','↑'][map.startDir],{fill:'#5a7c39','font-size':18,'text-anchor':'middle'});label(g,sx-14,sy+36,'入口',{fill:'#718958','font-size':9});}
+ if(map.start){const[sx,sy]=point(...map.start),g=svg('g',{'data-marker':'start','data-entry-angle':map.startAngle,'aria-label':`入口，朝向 ${map.startAngle} 度`},t);svg('rect',{x:sx-17,y:sy-17,width:34,height:34,rx:7,fill:'#d9edb1',stroke:'#aac783','stroke-width':1.5},g);label(g,sx,sy+4,'→',{fill:'#5a7c39','font-size':18,'text-anchor':'middle',transform:`rotate(${map.startAngle} ${sx} ${sy})`});label(g,sx-14,sy+36,'入口',{fill:'#718958','font-size':9});}
  if(map.goal){const[gx,gy]=point(...map.goal),g=svg('g',{'data-marker':'goal'},t);svg('rect',{x:gx-11,y:gy-17,width:23,height:34,rx:1,fill:'url(#checker)',stroke:'#8b9d77','stroke-width':1},g);label(g,gx-10,gy-29,'出口',{fill:'#697e56','font-size':9});}
  label(t,78,77,'APEX TESTING GROUNDS',{'font-size':9,fill:'#a3af94','letter-spacing':2});label(t,78,92,['OVERPASS CIRCUIT','URBAN CROSSROADS','THE LOOP','YOUR OWN CIRCUIT'][mapIndex],{'font-size':7,fill:'#b0baa3','letter-spacing':1.7});
  const compass=svg('g',{transform:`translate(${view.width-75} ${view.height-85})`},t);svg('circle',{r:20,fill:'none',stroke:'#cbd5be'},compass);svg('path',{d:'M0 -12L5 7L0 4L-5 7Z',fill:'#98a989'},compass);label(compass,0,-27,'N',{'text-anchor':'middle',fill:'#8b9e77','font-size':8});
@@ -143,14 +144,15 @@ async function train(fresh=false){
  finally{training=false;trainingTask=null;locked(false);save();reset();stats();if(job.restart){void train(true);}else{if(!failed)toast(`${job.stop?'已停止，保留':'本次完成'} ${count.toLocaleString()} 轮训练；可继续训练或从零重训。`);progressHideTimer=setTimeout(()=>$('trainingProgress').classList.add('hidden'),1800);}}
 }
 function beginEditor(){
- if(training)return;save();running=false;clearHeld();editing=true;editOrigin=mapIndex;draft=E.serializeMap(map);undo=[];paintPointer=null;
+ if(training)return;save();running=false;clearHeld();editing=true;editOrigin=mapIndex;draft=E.serializeMap(map);undo=[];paintPointer=null;angleBeforeDrag=null;
  $('editor').classList.remove('hidden');document.querySelector('.track-panel').classList.add('editing');syncEditorFields();$('mapSelect').disabled=true;$('start').disabled=true;$('train').disabled=true;$('editTrack').disabled=true;$('clearTraining').disabled=true;$('reset').disabled=true;drawMap();update();
 }
-function syncEditorFields(){$('entryDirection').value=draft.startDir;$('mapWidth').value=draft.width;$('mapHeight').value=draft.height;}
+function syncEditorFields(){const angle=draft.startAngle??draft.startDir*90;$('entryDirection').value=angle%90===0?String(angle/90):'custom';$('entryAngle').value=angle;$('entryAngleRange').value=angle;$('mapWidth').value=draft.width;$('mapHeight').value=draft.height;}
 function rebuildDraft(){map=E.makeMap(3,draft);syncEditorFields();drawMap();update();}
 function endEditor(saveChanges){
  if(!editing)return;
  if(saveChanges){
+  if(!$('entryAngle').reportValidity())return;setEntryAngle(Number($('entryAngle').value));
   if(!applyDraftSize())return;
   persist('apex-custom-track-v2',draft);persist('apex-vision-v3-3',null);
  }
@@ -175,8 +177,13 @@ $('track').addEventListener('pointerdown',e=>{if(!editing||e.button>0)return;e.p
 $('track').addEventListener('pointermove',e=>{if(editing&&paintPointer===e.pointerId){e.preventDefault();paint(e);}});
 function endPaint(e){if(e.pointerId===paintPointer){paintPointer=null;lastCell=null;if(!paintChanged)undo.pop();}}
 $('track').addEventListener('pointerup',endPaint);$('track').addEventListener('pointercancel',endPaint);
-document.querySelectorAll('[data-tool]').forEach(b=>b.onclick=()=>{tool=b.dataset.tool;document.querySelectorAll('[data-tool]').forEach(x=>x.classList.toggle('selected',x===b));$('editorHint').textContent=tool==='erase'?'点入口或出口会先擦掉标记、保留道路，再擦一次删除道路。支持撤销。':tool==='bridge'?'点击十字交叉处放置高架，上下道路互不连通。':tool==='start'?'点击任意格子放置或移动入口，旧入口会自动移走。':tool==='goal'?'点击任意格子放置或移动出口，旧出口会自动移走。':'拖动绘制道路；地图不完整也可以保存草稿。';});
-$('entryDirection').onchange=e=>{undo.push(JSON.stringify(draft));draft.startDir=Number(e.target.value);rebuildDraft();};$('undoEdit').onclick=()=>{if(undo.length){draft=JSON.parse(undo.pop());$('entryDirection').value=draft.startDir;rebuildDraft();}};
+document.querySelectorAll('[data-tool]').forEach(b=>b.onclick=()=>{tool=b.dataset.tool;document.querySelectorAll('[data-tool]').forEach(x=>x.classList.toggle('selected',x===b));$('editorHint').textContent=tool==='erase'?'点入口或出口会先擦掉标记、保留道路，再擦一次删除道路。支持撤销。':tool==='bridge'?'点击十字交叉处放置高架，上下道路互不连通。':tool==='start'?'点击地图移动入口；用下方旋转按钮或角度调整方向。R 右转 90°，Shift+R 左转。':tool==='goal'?'点击任意格子放置或移动出口，旧出口会自动移走。':'拖动绘制道路；地图不完整也可以保存草稿。';});
+function setEntryAngle(value,record=true){if(!editing||!Number.isFinite(value))return;const angle=((value%360)+360)%360;if(angle===(draft.startAngle??draft.startDir*90))return;if(record)undo.push(JSON.stringify(draft));draft.startAngle=angle;draft.startDir=Math.round(angle/90)%4;rebuildDraft();$('editorHint').textContent=`入口朝向 ${angle}°（0° 东、90° 南、180° 西、270° 北）。保存后赛车按此方向出发。`;}
+$('entryDirection').onchange=e=>{if(e.target.value!=='custom')setEntryAngle(Number(e.target.value)*90);};
+$('rotateEntryLeft').onclick=()=>setEntryAngle((draft.startAngle??draft.startDir*90)-90);$('rotateEntryRight').onclick=()=>setEntryAngle((draft.startAngle??draft.startDir*90)+90);
+$('entryAngle').onchange=e=>{if(e.target.reportValidity())setEntryAngle(Number(e.target.value));};$('entryAngle').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();e.target.blur();}};
+$('entryAngleRange').oninput=e=>{if(angleBeforeDrag===null)angleBeforeDrag=JSON.stringify(draft);setEntryAngle(Number(e.target.value),false);};$('entryAngleRange').onchange=()=>{if(angleBeforeDrag&&angleBeforeDrag!==JSON.stringify(draft))undo.push(angleBeforeDrag);angleBeforeDrag=null;};
+$('undoEdit').onclick=()=>{if(undo.length){angleBeforeDrag=null;draft=JSON.parse(undo.pop());rebuildDraft();}};
 $('editTrack').onclick=beginEditor;$('saveTrack').onclick=()=>endEditor(true);$('cancelEdit').onclick=()=>endEditor(false);
 $('fixMap').onclick=beginEditor;
 function applyDraftSize(){if(!editing)return false;if(!$('mapWidth').reportValidity()||!$('mapHeight').reportValidity())return false;const width=Number($('mapWidth').value),height=Number($('mapHeight').value);if(width===draft.width&&height===draft.height)return true;undo.push(JSON.stringify(draft));draft=E.resizeMap(draft,width,height);rebuildDraft();$('editorHint').textContent=`已调整为 ${draft.width} 列 × ${draft.height} 行；边界外的内容已裁掉，可撤销恢复。`;return true;}
@@ -193,7 +200,7 @@ const keyActions={w:'accelerate',s:'decelerate',a:'left',d:'right',arrowup:'acce
 window.addEventListener('keydown',e=>{
  if($('helpDialog').open||/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)||e.ctrlKey||e.metaKey||e.altKey)return;const k=e.key.toLowerCase();
  if(keyActions[k]){e.preventDefault();if(e.repeat||!takeControl())return;clearOpposite(keyActions[k]);latched.delete(keyActions[k]);physicalKeys.add(k);keys=new Set([...physicalKeys].map(k=>keyActions[k]));refreshHeld();}
- else if(k===' '&&!e.repeat&&e.target.tagName!=='BUTTON'){e.preventDefault();start();}else if(k==='r'&&!e.repeat&&!editing&&!training)reset();
+ else if(k===' '&&!e.repeat&&e.target.tagName!=='BUTTON'){e.preventDefault();start();}else if(k==='r'&&!e.repeat){if(editing&&tool==='start'){e.preventDefault();setEntryAngle((draft.startAngle??draft.startDir*90)+(e.shiftKey?-90:90));}else if(!editing&&!training)reset();}
 });
 window.addEventListener('keyup',e=>{const k=e.key.toLowerCase();if(keyActions[k]){physicalKeys.delete(k);keys=new Set([...physicalKeys].map(k=>keyActions[k]));refreshHeld();}});
 function releaseAll(){clearHeld();if(running){running=false;update();}}

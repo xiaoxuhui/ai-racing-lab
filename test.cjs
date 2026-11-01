@@ -5,6 +5,18 @@ require('./dist/vision.js');
 let seed = 19656;
 Math.random = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296);
 const config = { maxSpeed: 8, acceleration: 2, steering: 3 }, map = E.makeMap(0);
+for(const angle of [0,37,90,180,270,359]){
+ const rotated=E.makeMap(3,{...E.serializeMap(map),startAngle:angle});
+ assert(Math.abs(E.continuousInitial(rotated).angle-angle*Math.PI/180)<1e-12,'Departure direction must use the exact angle rather than snap to a cardinal');
+ const restored=E.makeMap(3,JSON.parse(JSON.stringify(E.serializeMap(rotated))));
+ assert.equal(restored.startAngle,angle,'Saving and reloading must preserve entrance rotation');
+ assert.equal(E.resizeMap(E.serializeMap(restored),30,20).startAngle,angle,'Resizing must retain entrance rotation');
+ assert(Math.abs(E.sense(restored,E.continuousInitial(restored)).rays[3].angle-angle*Math.PI/180)<1e-12,'Front sensor must rotate with the entrance and car');
+}
+const legacyNorth=E.makeMap(3,{roads:['2,2','2,1'],start:[2,2],goal:[2,1],startDir:3});
+assert.equal(legacyNorth.startAngle,270,'Old cardinal-direction saves must keep their original orientation');
+const rotatedBack=E.makeMap(3,{...E.serializeMap(map),startAngle:-90});
+assert.equal(rotatedBack.startAngle,270);
 const separate = E.makeMap(3,{width:10,height:8,roads:['2,2','3,2'],edges:[],bridges:[],start:[2,2],goal:[3,2],startDir:0});
 assert.equal(separate.edges.size,0,'Adjacent road cells must stay separate without an explicit stroke');
 assert(!E.onRoad(separate,2.5,2),'Road geometry must not invent a connection between neighboring cells');
