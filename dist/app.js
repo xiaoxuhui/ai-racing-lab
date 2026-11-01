@@ -1,15 +1,23 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id),E=Racing,NS='http://www.w3.org/2000/svg';
-let mapIndex=0,map,learner,state,mode='ai',running=false,training=false,queued=null,routeVisible=false,trail=[],last=0,clock=0,toastTimer,trainingToken=0,storageAvailable=true;
+const read=(k,fallback)=>{try{return JSON.parse(localStorage.getItem(k))??fallback;}catch{return fallback;}};
+const memory=new Map();
+let config={color:'#d5ed99',style:'sport',maxSpeed:8,acceleration:2,steering:3,...read('apex-car-v2',{})};
+let mapIndex=0,map,learner,state,mode='ai',running=false,training=false,editing=false,tool='road',draft=null,undo=[],editOrigin=0,paintPointer=null,lastCell=null,paintChanged=false;
+let routeVisible=false,trail=[],last=0,accumulator=0,toastTimer,storageAvailable=true,drivePlan=null,samples=null,pathIndex=0,held=new Set(),pointers=new Map(),keys=new Set(),repeatDelay=0,renderClock=0;
+const physicalKeys=new Set();
+function persist(k,v){memory.set(k,v);try{localStorage.setItem(k,JSON.stringify(v));}catch{if(storageAvailable){storageAvailable=false;toast('存储不可用，设置暂时保留在本次页面中。');}}}
+function load(k,fallback=null){return memory.has(k)?memory.get(k):read(k,fallback);}
 function toast(msg){$('toast').textContent=msg;$('toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').classList.remove('show'),3000);}
-function load(index){try{return JSON.parse(localStorage.getItem('apex-racing-v1-'+index)||'null');}catch{return null;}}
-function save(){try{localStorage.setItem('apex-racing-v1-'+mapIndex,JSON.stringify(learner.serialize()));}catch{if(storageAvailable){storageAvailable=false;toast('浏览器存储不可用，学习记录将保留在本次页面中。');}}}
-function init(index){mapIndex=index;map=E.makeMap(index);learner=new E.Learner(map,load(index));reset();drawMap();stats();}
-function reset(){running=false;clock=0;queued=null;state=E.initial();trail=[[state.x,state.y]];$('result').classList.add('hidden');update();drawDynamic();}
+function save(){if(learner)persist('apex-racing-v2-'+mapIndex,learner.serialize());}
+function init(index){mapIndex=index;map=E.makeMap(index,index===3?load('apex-custom-track-v2'):null);learner=new E.Learner(map,load('apex-racing-v2-'+index));$('mapSelect').value=index;reset();drawMap();stats();}
+function clearHeld(){held.clear();keys.clear();physicalKeys.clear();pointers.clear();document.querySelectorAll('[data-action]').forEach(b=>{b.classList.remove('pressed');b.setAttribute('aria-pressed','false');});}
+function reset(resume=false){running=resume;repeatDelay=0;accumulator=0;drivePlan=null;samples=null;pathIndex=0;clearHeld();state=E.continuousInitial(map);trail=[[state.x,state.y]];$('result').classList.add('hidden');drawDynamic();update();}
 function svg(tag,attrs={},parent){const n=document.createElementNS(NS,tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(parent)parent.appendChild(n);return n;}
 function label(parent,x,y,text,attrs={}){const n=svg('text',{x,y,'font-family':'DM Sans, Microsoft YaHei, sans-serif',...attrs},parent);n.textContent=text;return n;}
 function point(x,y){return [41+x*48,39+y*46];}
 function pathFor(points){return points.map((p,i)=>`${i?'L':'M'}${point(...p).join(' ')}`).join(' ');}
+
 function drawMap(){
  const t=$('track');t.replaceChildren();
  const defs=svg('defs',{},t),grid=svg('pattern',{id:'grid',width:48,height:46,patternUnits:'userSpaceOnUse',x:17,y:16},defs);svg('path',{d:'M48 0H0V46',fill:'none',stroke:'#d4dcc8','stroke-width':.6,'stroke-opacity':.6},grid);
@@ -27,32 +35,140 @@ function drawMap(){
  const bridgeLayer=svg('g',{},t);
  for(const k of map.bridges){const[x,y]=k.split(',').map(Number),[cx,cy]=point(x,y);svg('rect',{x:cx-57,y:cy-19,width:114,height:42,rx:3,fill:'#4f6346',opacity:.27},bridgeLayer);svg('rect',{x:cx-60,y:cy-17,width:120,height:34,rx:2,fill:'#93a081'},bridgeLayer);svg('path',{d:`M${cx-59} ${cy-17}h118 M${cx-59} ${cy+17}h118`,stroke:'#c8d2b7','stroke-width':4},bridgeLayer);svg('path',{d:`M${cx-58} ${cy}h116`,stroke:'#d5dfc1','stroke-width':1.3,'stroke-dasharray':'5 8'},bridgeLayer);label(t,cx-37,cy-29,'高架桥 · 上层',{fill:'#7b8c67','font-size':8,'letter-spacing':.6});}
  const [sx,sy]=point(...map.start),[gx,gy]=point(...map.goal);
- svg('rect',{x:sx-17,y:sy-17,width:34,height:34,rx:7,fill:'#d9edb1',stroke:'#aac783','stroke-width':1.5},t);label(t,sx,sy+4,'→',{fill:'#5a7c39','font-size':18,'text-anchor':'middle'});label(t,sx-14,sy+36,'入口',{fill:'#718958','font-size':9});
+ svg('rect',{x:sx-17,y:sy-17,width:34,height:34,rx:7,fill:'#d9edb1',stroke:'#aac783','stroke-width':1.5},t);label(t,sx,sy+4,['→','↓','←','↑'][map.startDir],{fill:'#5a7c39','font-size':18,'text-anchor':'middle'});label(t,sx-14,sy+36,'入口',{fill:'#718958','font-size':9});
  svg('rect',{x:gx-11,y:gy-17,width:23,height:34,rx:1,fill:'url(#checker)',stroke:'#8b9d77','stroke-width':1},t);label(t,gx-10,gy-29,'出口',{fill:'#697e56','font-size':9});
- label(t,78,77,'APEX TESTING GROUNDS',{'font-size':9,fill:'#a3af94','letter-spacing':2});label(t,78,92,['OVERPASS CIRCUIT','URBAN CROSSROADS','THE LOOP'][mapIndex],{'font-size':7,fill:'#b0baa3','letter-spacing':1.7});
+ label(t,78,77,'APEX TESTING GROUNDS',{'font-size':9,fill:'#a3af94','letter-spacing':2});label(t,78,92,['OVERPASS CIRCUIT','URBAN CROSSROADS','THE LOOP','YOUR OWN CIRCUIT'][mapIndex],{'font-size':7,fill:'#b0baa3','letter-spacing':1.7});
  const compass=svg('g',{transform:'translate(775 465)'},t);svg('circle',{r:20,fill:'none',stroke:'#cbd5be'},compass);svg('path',{d:'M0 -12L5 7L0 4L-5 7Z',fill:'#98a989'},compass);label(compass,0,-27,'N',{'text-anchor':'middle',fill:'#8b9e77','font-size':8});
- svg('g',{id:'trailLayer'},t);svg('g',{id:'carLayer'},t);drawReference();drawDynamic();
+ svg('g',{id:'trailLayer'},t);svg('g',{id:'carLayer'},t);if(editing)drawEditorGrid(t);drawReference();drawDynamic();
 }
-function drawReference(){const layer=$('routeLayer');if(!layer)return;layer.replaceChildren();if(!routeVisible)return;let s=E.initial(),points=[[s.x,s.y]];const seen=new Set();while(!(s.x===16&&s.y===2)&&points.length<180){const k=`${s.x},${s.y},${s.d}`;if(seen.has(k))break;seen.add(k);const choices=['straight','left','right'].map(a=>E.transition(map,s,a).state).filter(n=>!n.done||n.won).sort((a,b)=>(map.dist.get(`${a.x},${a.y},${a.d}`)??999)-(map.dist.get(`${b.x},${b.y},${b.d}`)??999));if(!choices.length)break;s=choices[0];points.push([s.x,s.y]);}svg('path',{d:pathFor(points),fill:'none',stroke:'#dceeb3','stroke-width':4,'stroke-linecap':'round','stroke-dasharray':'2 9',opacity:.8},layer);}
-function drawDynamic(){const layer=$('carLayer'),tl=$('trailLayer');if(!layer||!state)return;layer.replaceChildren();tl.replaceChildren();if(trail.length>1)svg('path',{d:pathFor(trail),fill:'none',stroke:'#dbed9c','stroke-width':3,'stroke-linecap':'round','stroke-linejoin':'round',opacity:.8},tl);
- let [x,y]=point(state.x,state.y);if(!map.roads.has(E.key(state.x,state.y))){const prev=trail[Math.max(0,trail.length-2)];[x,y]=point(...prev);x+=E.DIRS[state.d][0]*19;y+=E.DIRS[state.d][1]*19;}
- const car=svg('g',{transform:`translate(${x} ${y}) rotate(${state.d*90})`,filter:'url(#carShadow)',class:'road-car'+(state.done&&!state.won?' crashed':'')},layer);
- svg('ellipse',{rx:25,ry:23,fill:'#dcf3a2',opacity:.13},car);svg('rect',{x:-13,y:-12,width:8,height:5,rx:1,fill:'#354636'},car);svg('rect',{x:-13,y:7,width:8,height:5,rx:1,fill:'#354636'},car);svg('rect',{x:7,y:-12,width:7,height:5,rx:1,fill:'#354636'},car);svg('rect',{x:7,y:7,width:7,height:5,rx:1,fill:'#354636'},car);svg('rect',{x:-17,y:-9,width:34,height:18,rx:6,fill:'#d5ed99',stroke:'#f0ffcd','stroke-width':1.2},car);svg('path',{d:'M-2 -7L7 -6L9 0L7 6L-2 7Z',fill:'#55774a'},car);svg('path',{d:'M-12 -6h5v12h-5z',fill:'#a6c77c'},car);svg('path',{d:'M14 -6v3M14 3v3',stroke:'#f9ffe7','stroke-width':2},car);svg('path',{d:'M-15 -5v3M-15 3v3',stroke:'#bf9964','stroke-width':2},car);
+function drawReference(){const layer=$('routeLayer');if(!layer)return;layer.replaceChildren();if(!routeVisible||editing)return;const path=E.smoothPath(E.reference(map));if(path.length)svg('path',{d:pathFor(path.map(p=>[p.x,p.y])),fill:'none',stroke:'#dceeb3','stroke-width':3,'stroke-linecap':'round','stroke-dasharray':'2 7',opacity:.8},layer);}
+function drawEditorGrid(t){const g=svg('g',{'pointer-events':'none'},t);for(let y=0;y<=10;y++)for(let x=0;x<=16;x++){const[cx,cy]=point(x,y);svg('rect',{x:cx-23.5,y:cy-22.5,width:47,height:45,fill:'transparent',stroke:'#b5c79c','stroke-width':.7,'stroke-dasharray':'2 4',opacity:.65},g);}}
+function drawDynamic(){
+ const layer=$('carLayer'),tl=$('trailLayer');if(!layer||!state)return;
+ if(editing){layer.replaceChildren();tl.replaceChildren();return;}
+ let car=layer.firstElementChild;
+ if(!car){car=svg('g',{filter:'url(#carShadow)',class:'road-car'},layer);
+  svg('ellipse',{rx:25,ry:23,fill:'#dcf3a2',opacity:.13},car);svg('rect',{x:-13,y:-12,width:8,height:5,rx:1,fill:'#354636'},car);svg('rect',{x:-13,y:7,width:8,height:5,rx:1,fill:'#354636'},car);svg('rect',{x:7,y:-12,width:7,height:5,rx:1,fill:'#354636'},car);svg('rect',{x:7,y:7,width:7,height:5,rx:1,fill:'#354636'},car);svg('rect',{x:-17,y:-9,width:34,height:config.style==='formula'?14:18,rx:config.style==='buggy'?2:6,fill:config.color,stroke:'#f0ffcd','stroke-width':1.2},car);svg('path',{d:'M-2 -7L7 -6L9 0L7 6L-2 7Z',fill:'#55774a'},car);svg('path',{d:'M-12 -6h5v12h-5z',fill:'#a6c77c'},car);svg('path',{d:'M14 -6v3M14 3v3',stroke:'#f9ffe7','stroke-width':2},car);svg('path',{d:'M-15 -5v3M-15 3v3',stroke:'#bf9964','stroke-width':2},car);
+ if(config.style==='formula'){svg('rect',{x:-20,y:-13,width:4,height:26,rx:1,fill:config.color},car);svg('rect',{x:15,y:-13,width:4,height:26,rx:1,fill:config.color},car);}
+ if(config.style==='buggy')svg('path',{d:'M-8 -9v18M1 -9v18M-8 0h9',stroke:'#3d5337','stroke-width':2},car);
+ }
+ const[x,y]=point(state.x,state.y);car.setAttribute('transform',`translate(${x} ${y}) rotate(${state.angle*180/Math.PI}) scale(.73)`);car.classList.toggle('crashed',state.done&&!state.won);
+ let under=false;for(const k of map.bridges){const[bx,by]=k.split(',').map(Number);if(Math.abs(state.x-bx)<.36&&Math.abs(state.y-by)<.32&&Math.abs(Math.sin(state.angle))>.7)under=true;}car.setAttribute('opacity',under?.32:1);
+ const p=trail[trail.length-1];if(!p||Math.hypot(state.x-p[0],state.y-p[1])>.055){trail.push([state.x,state.y]);if(trail.length>1000)trail.shift();}
+ if(!tl.firstElementChild)svg('path',{fill:'none',stroke:'#dbed9c','stroke-width':2.5,'stroke-linecap':'round','stroke-linejoin':'round',opacity:.85},tl);
+ tl.firstElementChild.setAttribute('d',pathFor(trail));
 }
-const actionNames={straight:['直行','→'],accelerate:['加速','↑'],decelerate:['减速','↓'],left:['左转','↰'],right:['右转','↱']};
-function update(){if(!state)return;$('speed').innerHTML=E.SPEEDS[state.v].toFixed(1)+' <small>格 / 秒</small>';const seconds=state.time;$('elapsed').innerHTML=String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(Math.floor(seconds%60)).padStart(2,'0')+'<small>.'+Math.floor((seconds%1)*10)+'</small>';$('steps').innerHTML=state.steps+' <small>格</small>';const a=queued||state.action,an=actionNames[a];$('action').innerHTML=(state.steps||queued?an[0]:'等待指令')+' <span>'+(state.steps||queued?an[1]:'—')+'</span>';$('start').innerHTML=running?'Ⅱ 暂停驾驶':state.done?'↺ 再跑一轮':'<span>▶</span> '+(state.steps?'继续驾驶':'开始驾驶');$('runStatus').textContent=training?'AI 正在学习':state.done?state.reason:running?'行驶中':state.steps?'已暂停':'等待出发';$('coordinates').textContent=`位置 (${state.x}, ${state.y}) · 朝${['东','南','西','北'][state.d]} · ${map.bridges.has(E.key(state.x,state.y))?(state.d%2?'桥下':'高架'):'地面'}`;$('aiMode').classList.toggle('active',mode==='ai');$('manualMode').classList.toggle('active',mode==='manual');$('modeTitle').textContent=mode==='ai'?'训练你的赛车':'接管方向盘';$('modeDesc').textContent=mode==='ai'?'让 AI 反复探索赛道，从奖励与碰撞中学习，找到通往出口的路。':'用下方动作或 WASD 驾驶。先降速再转弯，沿着道路抵达棋盘格出口。';$('actionHint').textContent=queued?'下一格将执行：'+actionNames[queued][0]:'AI 会自动决策，也可点击动作临时接管。';}
+const actionNames={straight:['直行','→'],accelerate:['持续加速','↑'],decelerate:['持续减速','↓'],left:['持续左转','↰'],right:['持续右转','↱']};
+function update(){
+ if(!state)return;$('speed').innerHTML=state.speed.toFixed(2)+' <small>格 / 秒</small>';
+ const sec=state.time;$('elapsed').innerHTML=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(Math.floor(sec%60)).padStart(2,'0')+'<small>.'+Math.floor((sec%1)*10)+'</small>';
+ $('steps').innerHTML=state.distance.toFixed(2)+' <small>格</small>';
+ const an=actionNames[state.action]||actionNames.straight;$('action').innerHTML=(state.time?an[0]:'等待指令')+' <span>'+an[1]+'</span>';
+ $('start').innerHTML=running?'Ⅱ 暂停驾驶':state.done?'↺ 再跑一轮':'<span>▶</span> '+(state.time?'继续驾驶':'开始驾驶');
+ $('runStatus').textContent=editing?'正在编辑赛道':training?'AI 正在学习':state.done?state.reason:running?'连续行驶中':state.time?'已暂停':'等待出发';
+ $('coordinates').textContent=`位置 (${state.x.toFixed(2)}, ${state.y.toFixed(2)}) · 朝向 ${((state.angle*180/Math.PI%360+360)%360).toFixed(0)}°`;
+ $('aiMode').classList.toggle('active',mode==='ai');$('manualMode').classList.toggle('active',mode==='manual');$('aiMode').setAttribute('aria-pressed',mode==='ai');$('manualMode').setAttribute('aria-pressed',mode==='manual');
+ $('modeTitle').textContent=mode==='ai'?'训练你的赛车':'接管方向盘';
+ $('modeDesc').textContent=mode==='ai'?'学习路线选择，沿弧线连续行驶。速度与方向平滑变化，转弯没有速度限制。':'按住 WASD 或方向键持续控制，可同时加速和转向。松开后保持车速与方向。';
+ $('actionHint').textContent=held.size?'正在持续执行：'+[...held].map(a=>actionNames[a][0]).join(' + '):'按住连续生效，松开恢复匀速直行。转弯不限速。';
+}
 function stats(){const n=learner.episodes;$('episodes').innerHTML=n.toLocaleString()+' <small>轮</small>';const rate=learner.results.length?Math.round(100*learner.results.reduce((a,b)=>a+b,0)/learner.results.length):null;$('successRate').innerHTML=(rate??'—')+' <small>%</small>';$('bestTime').innerHTML=(learner.best===null?'—':learner.best.toFixed(1))+' <small>秒</small>';$('policyStatus').textContent=n?'已学习 '+n.toLocaleString()+' 轮':'尚未训练';$('learningNote').innerHTML=n?'已积累 '+n.toLocaleString()+' 轮驾驶经验。<br><span>点击开始驾驶，检验学到的策略。</span>':'每一次尝试，都让下一次更好。<br><span>先训练，再看看 AI 学到了什么。</span>';const h=learner.history,sl=$('sparkline');sl.replaceChildren();if(h.length>1){const d=h.map((v,i)=>`${i?'L':'M'}${(i/(h.length-1)*108+2).toFixed(1)},${(36-v*30).toFixed(1)}`).join(' ');svg('path',{d:d+' L110 40 L2 40Z',fill:'#eff5e4'},sl);svg('path',{d,fill:'none',stroke:'#97b66b','stroke-width':1.7},sl);}}
-function move(){if(training||state.done)return;let a=queued||(mode==='ai'?learner.choose(state,learner.episodes?0:.35):'straight');queued=null;const prev=state,r=E.transition(map,state,a);state=r.state;if(mode==='ai')learner.learn(prev,a,state,r.reward);trail.push([state.x,state.y]);drawDynamic();if(state.done){running=false;if(mode==='ai'){learner.record(state);save();stats();}$('result').classList.remove('hidden');$('result').innerHTML=(state.won?'⚑ 成功抵达出口！':'↺ '+state.reason)+'<small>'+(state.won?`${state.steps} 格 · ${state.time.toFixed(1)} 秒 · 再挑战一次更好的成绩`:'重置本轮即可继续，转弯请保持 ≤ 1 格/秒')+'</small>';}update();}
-function start(){if(training)return;if(state.done)reset();running=!running;clock=0;update();}
-function action(a){if(training)return;if(state.done){toast('本轮已结束，请重置后继续。');return;}queued=a;update();const b=document.querySelector(`[data-action="${a}"]`);b.classList.add('pressed');setTimeout(()=>b.classList.remove('pressed'),200);}
-function tick(now){const dt=last?Math.min(now-last,150):0;last=now;if(running&&!training){clock+=dt;if(clock>=1000/E.SPEEDS[state.v]){clock=0;move();}}requestAnimationFrame(tick);}
-async function train(){if(training)return;running=false;training=true;const token=++trainingToken;$('trainingProgress').classList.remove('hidden');$('train').textContent='Ⅱ 停止训练';$('mapSelect').disabled=true;$('start').disabled=true;$('step').disabled=true;$('reset').disabled=true;$('clearTraining').disabled=true;const epsilon=Number($('exploration').value)/100;let count=0;update();try{while(count<500&&training&&token===trainingToken){for(let i=0;i<10&&count<500;i++,count++)learner.episode(epsilon);$('progressBar').style.width=count/5+'%';$('progressText').textContent=`已训练 ${count} / 500 轮`;stats();await new Promise(r=>setTimeout(r,12));}}finally{training=false;$('train').innerHTML='✧ 训练 500 轮 <span>→</span>';$('mapSelect').disabled=false;$('start').disabled=false;$('step').disabled=false;$('reset').disabled=false;$('clearTraining').disabled=false;save();reset();stats();toast(`完成 ${count} 轮训练，可以开始驾驶了。`);setTimeout(()=>$('trainingProgress').classList.add('hidden'),2000);}}
-$('start').onclick=start;$('step').onclick=()=>{if(training)return;running=false;if(state.done)reset();clock=0;move();};$('reset').onclick=()=>{if(!training)reset();};$('train').onclick=()=>{if(training){training=false;return;}train();};
-$('aiMode').onclick=()=>{if(training)return;mode='ai';queued=null;update();};$('manualMode').onclick=()=>{if(training)return;mode='manual';queued=null;update();};document.querySelectorAll('[data-action]').forEach(b=>b.onclick=()=>action(b.dataset.action));
-$('exploration').oninput=e=>$('exploreValue').textContent=e.target.value+'%';$('mapSelect').onchange=e=>{save();init(Number(e.target.value));toast('已切换赛道，载入此地图的学习记录。');};
-$('routeToggle').onclick=()=>{routeVisible=!routeVisible;$('routeToggle').setAttribute('aria-pressed',routeVisible);drawReference();};$('clearTraining').onclick=()=>{if(training)return;learner=new E.Learner(map);save();reset();stats();toast('当前赛道学习记录已清空，AI 从零开始。');};
-$('help').onclick=()=>$('helpDialog').showModal();$('closeHelp').onclick=$('gotIt').onclick=()=>$('helpDialog').close();$('helpDialog').onclick=e=>{if(e.target===$('helpDialog')){const r=e.target.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)e.target.close();}};
-window.addEventListener('keydown',e=>{if($('helpDialog').open||/INPUT|SELECT|TEXTAREA|BUTTON/.test(e.target.tagName)||e.ctrlKey||e.metaKey||e.altKey||e.repeat)return;const k=e.key.toLowerCase();if(k===' '){e.preventDefault();start();}else if(k==='r'&&!training)reset();else if(['w','s','a','d','arrowup','arrowdown','arrowleft','arrowright'].includes(k)){e.preventDefault();action(({w:'accelerate',s:'decelerate',a:'left',d:'right',arrowup:'accelerate',arrowdown:'decelerate',arrowleft:'left',arrowright:'right'})[k]);}});
-document.addEventListener('visibilitychange',()=>{if(document.hidden&&running){running=false;clock=0;update();}});window.addEventListener('beforeunload',save);
-init(0);requestAnimationFrame(tick);
+
+function preparePlan(){drivePlan=E.plan(map,learner);samples=E.smoothPath(drivePlan.points);pathIndex=0;state.distance=0;}
+function finish(won,reason){
+ if(state.done)return;state.done=true;state.won=won;state.reason=reason;repeatDelay=.65;
+ if(mode==='ai'&&drivePlan){for(const[s,a,n,r]of drivePlan.transitions)learner.learn(s,a,n,r);learner.record({...drivePlan.final,won,time:state.time});save();stats();}
+ $('result').classList.remove('hidden');$('result').innerHTML=(won?'⚑ 成功抵达出口！':'↺ '+reason)+'<small>'+state.distance.toFixed(2)+' 格 · '+state.time.toFixed(1)+' 秒'+($('autoRepeat').checked?' · 即将自动开始下一轮':' · 可重置后继续')+'</small>';
+ if(!$('autoRepeat').checked)running=false;clearHeld();update();
+}
+function advance(dt){
+ if(mode==='manual'){
+  const next=E.advanceManual(map,state,{throttle:held.has('accelerate')?1:0,brake:held.has('decelerate')?1:0,steer:(held.has('right')?1:0)-(held.has('left')?1:0)},dt,config);
+  const done=next.done;state=next;if(done){state.done=false;finish(next.won,next.reason);}return;
+ }
+ if(!samples)preparePlan();
+ const here=E.samplePath(samples,state.distance,pathIndex),target=Math.min(config.maxSpeed,here.targetSpeed),delta=E.clamp(target-state.speed,-config.acceleration*dt,config.acceleration*dt),oldSpeed=state.speed,oldAngle=state.angle;
+ state.speed=E.clamp(state.speed+delta,0,config.maxSpeed);state.distance+=(oldSpeed+state.speed)/2*dt;state.time+=dt;
+ const p=E.samplePath(samples,state.distance,pathIndex);pathIndex=p.index;state.x=p.x;state.y=p.y;
+ const turn=Math.atan2(Math.sin(p.angle-oldAngle),Math.cos(p.angle-oldAngle));state.angle=oldAngle+turn;
+ state.action=Math.abs(turn)>.0005?(turn<0?'left':'right'):delta>.00001?'accelerate':delta<-.00001?'decelerate':'straight';
+ if(!E.onRoad(map,state.x,state.y))finish(false,'驶出道路');else if(p.done)finish(drivePlan.final.won,drivePlan.final.reason);
+}
+function frame(now){
+ const elapsed=last?Math.min((now-last)/1000,.15):0;last=now;
+ if(running&&!training&&!editing){
+  if(state.done){repeatDelay-=elapsed;if(repeatDelay<=0){if($('autoRepeat').checked)reset(true);else{running=false;update();}}}
+  else{accumulator+=elapsed;while(accumulator>=1/120&&!state.done){advance(1/120);accumulator-=1/120;}}
+  drawDynamic();renderClock+=elapsed;if(renderClock>.06){renderClock=0;update();}
+ }
+ requestAnimationFrame(frame);
+}
+function start(){if(training||editing)return;if(state.done)reset();running=!running;accumulator=0;clearHeld();update();}
+function setMode(next){if(training||editing||mode===next)return;mode=next;if(next==='ai'){reset(running);toast('已切换 AI 驾驶，从入口应用学习策略。');}else{drivePlan=null;samples=null;clearHeld();update();}}
+function refreshHeld(){held=new Set([...keys,...pointers.values()]);document.querySelectorAll('[data-action]').forEach(b=>{const on=held.has(b.dataset.action);b.classList.toggle('pressed',on);b.setAttribute('aria-pressed',on);});update();}
+function takeControl(){if(training||editing)return false;if(state.done)reset();if(mode==='ai'){mode='manual';drivePlan=null;samples=null;}running=true;update();return true;}
+function locked(v){for(const id of ['mapSelect','start','reset','clearTraining','editTrack','aiMode','manualMode'])$(id).disabled=v;document.querySelectorAll('[data-action]').forEach(b=>b.disabled=v);}
+async function train(){
+ if(training){training=false;return;}if(editing)return;running=false;clearHeld();training=true;locked(true);$('trainingProgress').classList.remove('hidden');$('train').textContent='Ⅱ 停止训练';let count=0;const epsilon=Number($('exploration').value)/100;update();
+ try{while(count<500&&training){for(let i=0;i<10&&count<500;i++,count++)learner.episode(epsilon);$('progressBar').style.width=count/5+'%';$('progressText').textContent=`已训练 ${count} / 500 轮`;stats();await new Promise(r=>setTimeout(r,12));}}
+ finally{training=false;locked(false);$('train').innerHTML='✧ 训练 500 轮 <span>→</span>';save();reset();stats();toast(`完成 ${count} 轮路线训练，点击开始连续驾驶。`);setTimeout(()=>$('trainingProgress').classList.add('hidden'),1800);}
+}
+function beginEditor(){
+ if(training)return;save();running=false;clearHeld();editing=true;editOrigin=mapIndex;draft=E.serializeMap(map);undo=[];paintPointer=null;
+ $('editor').classList.remove('hidden');document.querySelector('.track-panel').classList.add('editing');$('entryDirection').value=draft.startDir;$('mapSelect').disabled=true;$('start').disabled=true;$('train').disabled=true;$('editTrack').disabled=true;$('clearTraining').disabled=true;$('reset').disabled=true;drawMap();update();
+}
+function rebuildDraft(){map=E.makeMap(3,draft);drawMap();update();}
+function endEditor(saveChanges){
+ if(!editing)return;
+ if(saveChanges){
+  if(draft.start[0]===draft.goal[0]&&draft.start[1]===draft.goal[1]){toast('入口和出口需要放在不同位置。');return;}
+  const checked=E.makeMap(3,draft),s=E.initial(checked);if(!checked.roads.has(E.key(...checked.start))||!checked.roads.has(E.key(...checked.goal))||!checked.dist.has(`${s.x},${s.y},${s.d}`)){toast('入口还不能到达出口，请补齐道路或调整入口朝向。');return;}
+  for(const k of checked.bridges){const[x,y]=k.split(',').map(Number);if(!E.DIRS.every(([dx,dy])=>checked.roads.has(E.key(x+dx,y+dy)))){toast('高架桥需要放在四个方向都有道路的十字交叉处。');return;}}
+  persist('apex-custom-track-v2',draft);persist('apex-racing-v2-3',null);
+ }
+ editing=false;paintPointer=null;draft=null;undo=[];$('editor').classList.add('hidden');document.querySelector('.track-panel').classList.remove('editing');locked(false);$('train').disabled=false;init(saveChanges?3:editOrigin);if(saveChanges)toast('自定义赛道已保存，新路线可以重新训练。');
+}
+function gridCell(e){const r=$('track').getBoundingClientRect(),x=Math.round(((e.clientX-r.left)/r.width*850-41)/48),y=Math.round(((e.clientY-r.top)/r.height*550-39)/46);return x>=0&&x<=16&&y>=0&&y<=10?[x,y]:null;}
+function paintCell(x,y){
+ const k=E.key(x,y),roads=new Set(draft.roads),bridges=new Set(draft.bridges);
+ if(tool==='road')roads.add(k);else if(tool==='erase'){roads.delete(k);bridges.delete(k);}else if(tool==='bridge'){roads.add(k);bridges.add(k);}else if(tool==='start'){roads.add(k);draft.start=[x,y];}else if(tool==='goal'){roads.add(k);draft.goal=[x,y];}
+ draft.roads=[...roads];draft.bridges=[...bridges];
+}
+function paint(e){
+ const cell=gridCell(e);if(!cell)return;if(lastCell&&lastCell[0]===cell[0]&&lastCell[1]===cell[1])return;
+ if(lastCell&&(tool==='road'||tool==='erase')){let[x,y]=lastCell;const dx=Math.abs(cell[0]-x),dy=Math.abs(cell[1]-y),sx=Math.sign(cell[0]-x),sy=Math.sign(cell[1]-y);let err=dx-dy;while(x!==cell[0]||y!==cell[1]){paintCell(x,y);const oldY=y,e2=err*2;let movedX=false;if(e2>-dy){err-=dy;x+=sx;movedX=true;}if(e2<dx){err+=dx;y+=sy;if(movedX)paintCell(x,oldY);}}}
+ paintCell(...cell);lastCell=cell;paintChanged=true;rebuildDraft();
+}
+$('track').addEventListener('pointerdown',e=>{if(!editing||e.button>0)return;e.preventDefault();paintPointer=e.pointerId;lastCell=null;paintChanged=false;undo.push(JSON.stringify(draft));if(undo.length>40)undo.shift();$('track').setPointerCapture(e.pointerId);paint(e);});
+$('track').addEventListener('pointermove',e=>{if(editing&&paintPointer===e.pointerId){e.preventDefault();paint(e);}});
+function endPaint(e){if(e.pointerId===paintPointer){paintPointer=null;lastCell=null;if(!paintChanged)undo.pop();}}
+$('track').addEventListener('pointerup',endPaint);$('track').addEventListener('pointercancel',endPaint);
+document.querySelectorAll('[data-tool]').forEach(b=>b.onclick=()=>{tool=b.dataset.tool;document.querySelectorAll('[data-tool]').forEach(x=>x.classList.toggle('selected',x===b));$('editorHint').textContent=tool==='erase'?'拖动擦除道路或高架桥。可用「撤销」恢复。':tool==='bridge'?'点击十字交叉处放置高架，上下道路互不连通。':'拖动绘制道路，或点击放置入口、出口；完成后保存。';});
+$('entryDirection').onchange=e=>{undo.push(JSON.stringify(draft));draft.startDir=Number(e.target.value);rebuildDraft();};$('undoEdit').onclick=()=>{if(undo.length){draft=JSON.parse(undo.pop());$('entryDirection').value=draft.startDir;rebuildDraft();}};
+$('editTrack').onclick=beginEditor;$('saveTrack').onclick=()=>endEditor(true);$('cancelEdit').onclick=()=>endEditor(false);
+$('start').onclick=start;$('reset').onclick=()=>{if(!training&&!editing)reset();};$('train').onclick=train;
+$('aiMode').onclick=()=>setMode('ai');$('manualMode').onclick=()=>setMode('manual');
+document.querySelectorAll('[data-action]').forEach(b=>{
+ b.addEventListener('pointerdown',e=>{if(e.button>0||!takeControl())return;e.preventDefault();b.setPointerCapture(e.pointerId);pointers.set(e.pointerId,b.dataset.action);refreshHeld();});
+ const release=e=>{pointers.delete(e.pointerId);refreshHeld();};b.addEventListener('pointerup',release);b.addEventListener('pointercancel',release);b.addEventListener('lostpointercapture',release);
+ b.addEventListener('keydown',e=>{if((e.key===' '||e.key==='Enter')&&!e.repeat){e.preventDefault();if(takeControl()){keys.add(b.dataset.action);refreshHeld();}}});
+ b.addEventListener('keyup',e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();keys.delete(b.dataset.action);refreshHeld();}});
+});
+const keyActions={w:'accelerate',s:'decelerate',a:'left',d:'right',arrowup:'accelerate',arrowdown:'decelerate',arrowleft:'left',arrowright:'right'};
+window.addEventListener('keydown',e=>{
+ if($('helpDialog').open||/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)||e.ctrlKey||e.metaKey||e.altKey)return;const k=e.key.toLowerCase();
+ if(keyActions[k]){e.preventDefault();if(e.repeat||!takeControl())return;physicalKeys.add(k);keys=new Set([...physicalKeys].map(k=>keyActions[k]));refreshHeld();}
+ else if(k===' '&&!e.repeat&&e.target.tagName!=='BUTTON'){e.preventDefault();start();}else if(k==='r'&&!e.repeat&&!editing&&!training)reset();
+});
+window.addEventListener('keyup',e=>{const k=e.key.toLowerCase();if(keyActions[k]){physicalKeys.delete(k);keys=new Set([...physicalKeys].map(k=>keyActions[k]));refreshHeld();}});
+function releaseAll(){clearHeld();if(running){running=false;update();}}
+window.addEventListener('blur',releaseAll);document.addEventListener('visibilitychange',()=>{if(document.hidden)releaseAll();});
+$('exploration').oninput=e=>$('exploreValue').textContent=e.target.value+'%';$('mapSelect').onchange=e=>{save();init(Number(e.target.value));toast('已切换赛道。');};
+$('routeToggle').onclick=()=>{routeVisible=!routeVisible;$('routeToggle').setAttribute('aria-pressed',routeVisible);drawReference();};
+$('clearTraining').onclick=()=>{if(training||editing)return;learner=new E.Learner(map);save();reset();stats();toast('当前赛道的学习记录已清空。');};
+$('help').onclick=()=>{running=false;clearHeld();update();$('helpDialog').showModal();};$('closeHelp').onclick=$('gotIt').onclick=()=>$('helpDialog').close();
+$('helpDialog').onclick=e=>{if(e.target===$('helpDialog')){const r=e.target.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)e.target.close();}};
+for(const k of ['maxSpeed','acceleration','steering']){$(k).value=config[k];$(k+'Value').textContent=config[k];$(k).oninput=e=>{config[k]=Number(e.target.value);$(k+'Value').textContent=config[k];persist('apex-car-v2',config);};}
+$('carColor').value=config.color;$('carStyle').value=config.style;$('carColor').oninput=e=>{config.color=e.target.value;persist('apex-car-v2',config);$('carLayer').replaceChildren();drawDynamic();};$('carStyle').onchange=e=>{config.style=e.target.value;persist('apex-car-v2',config);$('carLayer').replaceChildren();drawDynamic();};
+window.addEventListener('beforeunload',save);init(0);requestAnimationFrame(frame);
 })();
