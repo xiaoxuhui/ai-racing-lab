@@ -4,15 +4,16 @@ const read=(k,fallback)=>{try{return JSON.parse(localStorage.getItem(k))??fallba
 const memory=new Map();
 let config={color:'#d5ed99',style:'sport',maxSpeed:8,acceleration:2,steering:3,...read('apex-car-v2',{})};
 let mapIndex=0,map,learner,state,mode='ai',running=false,training=false,editing=false,tool='road',draft=null,undo=[],editOrigin=0,paintPointer=null,lastCell=null,paintChanged=false;
-let routeVisible=false,trail=[],last=0,accumulator=0,toastTimer,storageAvailable=true,drivePlan=null,samples=null,pathIndex=0,held=new Set(),pointers=new Map(),keys=new Set(),repeatDelay=0,renderClock=0;
+let routeVisible=false,trail=[],last=0,accumulator=0,toastTimer,storageAvailable=true,held=new Set(),pointers=new Map(),keys=new Set(),repeatDelay=0,renderClock=0;
+let observation=null,decision=null,decisionTicks=0,visited=new Set(),showVision=true,visionRange=4;
 const physicalKeys=new Set();
 function persist(k,v){memory.set(k,v);try{localStorage.setItem(k,JSON.stringify(v));}catch{if(storageAvailable){storageAvailable=false;toast('存储不可用，设置暂时保留在本次页面中。');}}}
 function load(k,fallback=null){return memory.has(k)?memory.get(k):read(k,fallback);}
 function toast(msg){$('toast').textContent=msg;$('toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').classList.remove('show'),3000);}
-function save(){if(learner)persist('apex-racing-v2-'+mapIndex,learner.serialize());}
-function init(index){mapIndex=index;map=E.makeMap(index,index===3?load('apex-custom-track-v2'):null);learner=new E.Learner(map,load('apex-racing-v2-'+index));$('mapSelect').value=index;reset();drawMap();stats();}
+function save(){if(learner)persist('apex-vision-v3-'+mapIndex,learner.serialize());}
+function init(index){mapIndex=index;map=E.makeMap(index,index===3?load('apex-custom-track-v2'):null);learner=new E.VisionLearner(load('apex-vision-v3-'+index));$('mapSelect').value=index;reset();drawMap();stats();}
 function clearHeld(){held.clear();keys.clear();physicalKeys.clear();pointers.clear();document.querySelectorAll('[data-action]').forEach(b=>{b.classList.remove('pressed');b.setAttribute('aria-pressed','false');});}
-function reset(resume=false){running=resume;repeatDelay=0;accumulator=0;drivePlan=null;samples=null;pathIndex=0;clearHeld();state=E.continuousInitial(map);trail=[[state.x,state.y]];$('result').classList.add('hidden');drawDynamic();update();}
+function reset(resume=false){running=resume;repeatDelay=0;accumulator=0;decision=null;decisionTicks=0;visited=new Set();learner.buffer=[];clearHeld();state=E.continuousInitial(map);observation=E.sense(map,state,visionRange);trail=[[state.x,state.y]];$('result').classList.add('hidden');drawDynamic();update();}
 function svg(tag,attrs={},parent){const n=document.createElementNS(NS,tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(parent)parent.appendChild(n);return n;}
 function label(parent,x,y,text,attrs={}){const n=svg('text',{x,y,'font-family':'DM Sans, Microsoft YaHei, sans-serif',...attrs},parent);n.textContent=text;return n;}
 function point(x,y){return [41+x*48,39+y*46];}
@@ -39,13 +40,13 @@ function drawMap(){
  svg('rect',{x:gx-11,y:gy-17,width:23,height:34,rx:1,fill:'url(#checker)',stroke:'#8b9d77','stroke-width':1},t);label(t,gx-10,gy-29,'出口',{fill:'#697e56','font-size':9});
  label(t,78,77,'APEX TESTING GROUNDS',{'font-size':9,fill:'#a3af94','letter-spacing':2});label(t,78,92,['OVERPASS CIRCUIT','URBAN CROSSROADS','THE LOOP','YOUR OWN CIRCUIT'][mapIndex],{'font-size':7,fill:'#b0baa3','letter-spacing':1.7});
  const compass=svg('g',{transform:'translate(775 465)'},t);svg('circle',{r:20,fill:'none',stroke:'#cbd5be'},compass);svg('path',{d:'M0 -12L5 7L0 4L-5 7Z',fill:'#98a989'},compass);label(compass,0,-27,'N',{'text-anchor':'middle',fill:'#8b9e77','font-size':8});
- svg('g',{id:'trailLayer'},t);svg('g',{id:'carLayer'},t);if(editing)drawEditorGrid(t);drawReference();drawDynamic();
+ svg('g',{id:'trailLayer'},t);svg('g',{id:'visionLayer','pointer-events':'none'},t);svg('g',{id:'carLayer'},t);if(editing)drawEditorGrid(t);drawReference();drawDynamic();
 }
 function drawReference(){const layer=$('routeLayer');if(!layer)return;layer.replaceChildren();if(!routeVisible||editing)return;const path=E.smoothPath(E.reference(map));if(path.length)svg('path',{d:pathFor(path.map(p=>[p.x,p.y])),fill:'none',stroke:'#dceeb3','stroke-width':3,'stroke-linecap':'round','stroke-dasharray':'2 7',opacity:.8},layer);}
 function drawEditorGrid(t){const g=svg('g',{'pointer-events':'none'},t);for(let y=0;y<=10;y++)for(let x=0;x<=16;x++){const[cx,cy]=point(x,y);svg('rect',{x:cx-23.5,y:cy-22.5,width:47,height:45,fill:'transparent',stroke:'#b5c79c','stroke-width':.7,'stroke-dasharray':'2 4',opacity:.65},g);}}
 function drawDynamic(){
  const layer=$('carLayer'),tl=$('trailLayer');if(!layer||!state)return;
- if(editing){layer.replaceChildren();tl.replaceChildren();return;}
+ if(editing){layer.replaceChildren();tl.replaceChildren();$('visionLayer')?.replaceChildren();return;}
  let car=layer.firstElementChild;
  if(!car){car=svg('g',{filter:'url(#carShadow)',class:'road-car'},layer);
   svg('ellipse',{rx:25,ry:23,fill:'#dcf3a2',opacity:.13},car);svg('rect',{x:-13,y:-12,width:8,height:5,rx:1,fill:'#354636'},car);svg('rect',{x:-13,y:7,width:8,height:5,rx:1,fill:'#354636'},car);svg('rect',{x:7,y:-12,width:7,height:5,rx:1,fill:'#354636'},car);svg('rect',{x:7,y:7,width:7,height:5,rx:1,fill:'#354636'},car);svg('rect',{x:-17,y:-9,width:34,height:config.style==='formula'?14:18,rx:config.style==='buggy'?2:6,fill:config.color,stroke:'#f0ffcd','stroke-width':1.2},car);svg('path',{d:'M-2 -7L7 -6L9 0L7 6L-2 7Z',fill:'#55774a'},car);svg('path',{d:'M-12 -6h5v12h-5z',fill:'#a6c77c'},car);svg('path',{d:'M14 -6v3M14 3v3',stroke:'#f9ffe7','stroke-width':2},car);svg('path',{d:'M-15 -5v3M-15 3v3',stroke:'#bf9964','stroke-width':2},car);
@@ -56,7 +57,22 @@ function drawDynamic(){
  let under=false;for(const k of map.bridges){const[bx,by]=k.split(',').map(Number);if(Math.abs(state.x-bx)<.36&&Math.abs(state.y-by)<.32&&Math.abs(Math.sin(state.angle))>.7)under=true;}car.setAttribute('opacity',under?.32:1);
  const p=trail[trail.length-1];if(!p||Math.hypot(state.x-p[0],state.y-p[1])>.055){trail.push([state.x,state.y]);if(trail.length>1000)trail.shift();}
  if(!tl.firstElementChild)svg('path',{fill:'none',stroke:'#dbed9c','stroke-width':2.5,'stroke-linecap':'round','stroke-linejoin':'round',opacity:.85},tl);
- tl.firstElementChild.setAttribute('d',pathFor(trail));
+ tl.firstElementChild.setAttribute('d',pathFor(trail));drawVision();
+}
+function drawVision(){
+ const layer=$('visionLayer');if(!layer||editing)return;layer.replaceChildren();observation=E.sense(map,state,visionRange);const o=observation,[cx,cy]=point(state.x,state.y);
+ if(showVision){
+  const ends=o.rays.map(r=>point(state.x+Math.cos(r.angle)*r.distance,state.y+Math.sin(r.angle)*r.distance)),fan='M'+cx+' '+cy+' '+ends.map(p=>'L'+p.join(' ')).join(' ')+' Z';svg('path',{d:fan,fill:'#b8e879',opacity:.13},layer);
+  for(let i=0;i<o.rays.length;i++){const r=o.rays[i],[x,y]=ends[i],color=r.distance<.3?'#e98365':r.distance<.7?'#d8b45e':'#a9d975';svg('line',{x1:cx,y1:cy,x2:x,y2:y,stroke:color,'stroke-width':i===3?1.6:1,'stroke-opacity':.8},layer);svg('circle',{cx:x,cy:y,r:i===3?2.8:2,fill:color},layer);}
+  const a=state.angle+o.goalBearing,gx=cx+Math.cos(a)*23,gy=cy+Math.sin(a)*23;svg('path',{d:`M${cx} ${cy}L${gx} ${gy}`,stroke:'#81bfed','stroke-width':1.6,'stroke-dasharray':'2 2'},layer);
+ }
+ const readings=$('sensorReadings');readings.replaceChildren();
+ const names=['左后','左侧','左前','正前','右前','右侧','右后'];
+ o.rays.forEach((r,i)=>{const el=document.createElement('div');el.className='sensor-reading';const title=document.createElement('span');title.textContent=names[i];const meter=document.createElement('i');meter.style.setProperty('--distance',Math.max(2,r.distance/visionRange*100)+'%');meter.style.setProperty('--ray',r.distance<.3?'#d98b71':r.distance<.7?'#c3aa6e':'#92b96b');const value=document.createElement('b');value.textContent=r.distance.toFixed(2);el.append(title,meter,value);readings.append(el);});
+ $('goalBearing').textContent=(o.goalBearing*180/Math.PI).toFixed(0)+'°';$('visionState').textContent=E.observationKey(o);
+ const qs=learner.q[E.observationKey(o)]||[0,0,0,0,0],best=Math.max(...qs),scale=Math.max(1,...qs.map(Math.abs));
+ $('qValues').replaceChildren();E.ACTIONS.forEach((a,i)=>{const el=document.createElement('div');el.className='q-row'+(qs[i]===best?' best':'');const name=document.createElement('span');name.textContent={straight:'直行',accelerate:'加速',decelerate:'减速',left:'左转',right:'右转'}[a];const bar=document.createElement('i');bar.style.width=(8+Math.abs(qs[i])/scale*52)+'%';const value=document.createElement('b');value.textContent=qs[i].toFixed(2);el.append(name,bar,value);$('qValues').append(el);});
+ $('rewardValue').textContent=learner.lastReward.toFixed(2);$('knownStates').textContent=Object.keys(learner.q).length.toLocaleString();
 }
 const actionNames={straight:['直行','→'],accelerate:['持续加速','↑'],decelerate:['持续减速','↓'],left:['持续左转','↰'],right:['持续右转','↱']};
 function update(){
@@ -69,15 +85,18 @@ function update(){
  $('coordinates').textContent=`位置 (${state.x.toFixed(2)}, ${state.y.toFixed(2)}) · 朝向 ${((state.angle*180/Math.PI%360+360)%360).toFixed(0)}°`;
  $('aiMode').classList.toggle('active',mode==='ai');$('manualMode').classList.toggle('active',mode==='manual');$('aiMode').setAttribute('aria-pressed',mode==='ai');$('manualMode').setAttribute('aria-pressed',mode==='manual');
  $('modeTitle').textContent=mode==='ai'?'训练你的赛车':'接管方向盘';
- $('modeDesc').textContent=mode==='ai'?'学习路线选择，沿弧线连续行驶。速度与方向平滑变化，转弯没有速度限制。':'按住 WASD 或方向键持续控制，可同时加速和转向。松开后保持车速与方向。';
+ $('modeDesc').textContent=mode==='ai'?'读取 7 条探测射线、车速和出口方位，用 Q 值选择油门、刹车与转向。需要反复试错，训练后也可能撞车。':'按住 WASD 或方向键持续控制，可同时加速和转向。松开后保持车速与方向。';
  $('actionHint').textContent=held.size?'正在持续执行：'+[...held].map(a=>actionNames[a][0]).join(' + '):'按住连续生效，松开恢复匀速直行。转弯不限速。';
 }
-function stats(){const n=learner.episodes;$('episodes').innerHTML=n.toLocaleString()+' <small>轮</small>';const rate=learner.results.length?Math.round(100*learner.results.reduce((a,b)=>a+b,0)/learner.results.length):null;$('successRate').innerHTML=(rate??'—')+' <small>%</small>';$('bestTime').innerHTML=(learner.best===null?'—':learner.best.toFixed(1))+' <small>秒</small>';$('policyStatus').textContent=n?'已学习 '+n.toLocaleString()+' 轮':'尚未训练';$('learningNote').innerHTML=n?'已积累 '+n.toLocaleString()+' 轮驾驶经验。<br><span>点击开始驾驶，检验学到的策略。</span>':'每一次尝试，都让下一次更好。<br><span>先训练，再看看 AI 学到了什么。</span>';const h=learner.history,sl=$('sparkline');sl.replaceChildren();if(h.length>1){const d=h.map((v,i)=>`${i?'L':'M'}${(i/(h.length-1)*108+2).toFixed(1)},${(36-v*30).toFixed(1)}`).join(' ');svg('path',{d:d+' L110 40 L2 40Z',fill:'#eff5e4'},sl);svg('path',{d,fill:'none',stroke:'#97b66b','stroke-width':1.7},sl);}}
+function stats(){
+ const n=learner.episodes;$('episodes').innerHTML=n.toLocaleString()+' <small>轮</small>';const rate=learner.results.length?Math.round(100*learner.results.reduce((a,b)=>a+b,0)/learner.results.length):null;$('successRate').innerHTML=(rate??'—')+' <small>%</small>';$('bestTime').innerHTML=(learner.best===null?'—':learner.best.toFixed(1))+' <small>秒</small>';$('policyStatus').textContent=n?'已学习 '+n.toLocaleString()+' 轮':'尚未训练';
+ const distances=learner.distances,average=distances.length?distances.reduce((a,b)=>a+b,0)/distances.length:0;$('learningNote').innerHTML=n?'最近 '+distances.length+' 轮平均行驶 '+average.toFixed(2)+' 格。<br><span>已学习 '+n.toLocaleString()+' 轮，继续观察与训练。</span>':'从射线距离开始积累驾驶经验。<br><span>先训练，再观察 Q 值怎样影响动作。</span>';
+ const h=learner.history,sl=$('sparkline');sl.replaceChildren();if(h.length>1){const d=h.map((v,i)=>`${i?'L':'M'}${(i/(h.length-1)*108+2).toFixed(1)},${(36-v*30).toFixed(1)}`).join(' ');svg('path',{d:d+' L110 40 L2 40Z',fill:'#eff5e4'},sl);svg('path',{d,fill:'none',stroke:'#97b66b','stroke-width':1.7},sl);}drawVision();
+}
 
-function preparePlan(){drivePlan=E.plan(map,learner);samples=E.smoothPath(drivePlan.points);pathIndex=0;state.distance=0;}
 function finish(won,reason){
  if(state.done)return;state.done=true;state.won=won;state.reason=reason;repeatDelay=.65;
- if(mode==='ai'&&drivePlan){for(const[s,a,n,r]of drivePlan.transitions)learner.learn(s,a,n,r);learner.record({...drivePlan.final,won,time:state.time});save();stats();}
+ if(mode==='ai'){learner.record(state);save();stats();}
  $('result').classList.remove('hidden');$('result').innerHTML=(won?'⚑ 成功抵达出口！':'↺ '+reason)+'<small>'+state.distance.toFixed(2)+' 格 · '+state.time.toFixed(1)+' 秒'+($('autoRepeat').checked?' · 即将自动开始下一轮':' · 可重置后继续')+'</small>';
  if(!$('autoRepeat').checked)running=false;clearHeld();update();
 }
@@ -86,13 +105,10 @@ function advance(dt){
   const next=E.advanceManual(map,state,{throttle:held.has('accelerate')?1:0,brake:held.has('decelerate')?1:0,steer:(held.has('right')?1:0)-(held.has('left')?1:0)},dt,config);
   const done=next.done;state=next;if(done){state.done=false;finish(next.won,next.reason);}return;
  }
- if(!samples)preparePlan();
- const here=E.samplePath(samples,state.distance,pathIndex),target=Math.min(config.maxSpeed,here.targetSpeed),delta=E.clamp(target-state.speed,-config.acceleration*dt,config.acceleration*dt),oldSpeed=state.speed,oldAngle=state.angle;
- state.speed=E.clamp(state.speed+delta,0,config.maxSpeed);state.distance+=(oldSpeed+state.speed)/2*dt;state.time+=dt;
- const p=E.samplePath(samples,state.distance,pathIndex);pathIndex=p.index;state.x=p.x;state.y=p.y;
- const turn=Math.atan2(Math.sin(p.angle-oldAngle),Math.cos(p.angle-oldAngle));state.angle=oldAngle+turn;
- state.action=Math.abs(turn)>.0005?(turn<0?'left':'right'):delta>.00001?'accelerate':delta<-.00001?'decelerate':'straight';
- if(!E.onRoad(map,state.x,state.y))finish(false,'驶出道路');else if(p.done)finish(drivePlan.final.won,drivePlan.final.reason);
+ if(!decision){const seen=E.sense(map,state,visionRange);decision={before:state,observation:seen,action:learner.choose(seen,.02)};decisionTicks=0;}
+ state=E.advanceManual(map,state,E.CONTROLS[decision.action],dt,config);decisionTicks++;
+ if(decisionTicks>=8||state.done){const reward=E.rewardFor(map,decision.before,state,visited),seen=E.sense(map,state,visionRange);learner.learn(decision.observation,decision.action,seen,reward,state.done);decision=null;decisionTicks=0;}
+ if(state.done){const won=state.won,reason=state.reason;state.done=false;finish(won,reason);}
 }
 function frame(now){
  const elapsed=last?Math.min((now-last)/1000,.15):0;last=now;
@@ -104,14 +120,14 @@ function frame(now){
  requestAnimationFrame(frame);
 }
 function start(){if(training||editing)return;if(state.done)reset();running=!running;accumulator=0;clearHeld();update();}
-function setMode(next){if(training||editing||mode===next)return;mode=next;if(next==='ai'){reset(running);toast('已切换 AI 驾驶，从入口应用学习策略。');}else{drivePlan=null;samples=null;clearHeld();update();}}
+function setMode(next){if(training||editing||mode===next)return;mode=next;if(next==='ai'){reset(running);toast('已切换视野 AI，从入口开始观察和驾驶。');}else{decision=null;learner.buffer=[];clearHeld();update();}}
 function refreshHeld(){held=new Set([...keys,...pointers.values()]);document.querySelectorAll('[data-action]').forEach(b=>{const on=held.has(b.dataset.action);b.classList.toggle('pressed',on);b.setAttribute('aria-pressed',on);});update();}
-function takeControl(){if(training||editing)return false;if(state.done)reset();if(mode==='ai'){mode='manual';drivePlan=null;samples=null;}running=true;update();return true;}
+function takeControl(){if(training||editing)return false;if(state.done)reset();if(mode==='ai'){mode='manual';decision=null;learner.buffer=[];}running=true;update();return true;}
 function locked(v){for(const id of ['mapSelect','start','reset','clearTraining','editTrack','aiMode','manualMode'])$(id).disabled=v;document.querySelectorAll('[data-action]').forEach(b=>b.disabled=v);}
 async function train(){
  if(training){training=false;return;}if(editing)return;running=false;clearHeld();training=true;locked(true);$('trainingProgress').classList.remove('hidden');$('train').textContent='Ⅱ 停止训练';let count=0;const epsilon=Number($('exploration').value)/100;update();
- try{while(count<500&&training){for(let i=0;i<10&&count<500;i++,count++)learner.episode(epsilon);$('progressBar').style.width=count/5+'%';$('progressText').textContent=`已训练 ${count} / 500 轮`;stats();await new Promise(r=>setTimeout(r,12));}}
- finally{training=false;locked(false);$('train').innerHTML='✧ 训练 500 轮 <span>→</span>';save();reset();stats();toast(`完成 ${count} 轮路线训练，点击开始连续驾驶。`);setTimeout(()=>$('trainingProgress').classList.add('hidden'),1800);}
+ try{while(count<5000&&training){const start=performance.now();do{learner.episode(map,config,Math.max(.03,epsilon/(1+learner.episodes/2000)),visionRange);count++;}while(count<5000&&performance.now()-start<12);$('progressBar').style.width=count/50+'%';$('progressText').textContent=`已训练 ${count.toLocaleString()} / 5,000 轮`;stats();await new Promise(r=>setTimeout(r,0));}}
+ finally{training=false;locked(false);$('train').innerHTML='✧ 训练 5,000 轮 <span>→</span>';save();reset();stats();toast(`完成 ${count.toLocaleString()} 轮视野驾驶训练，可继续训练或观察驾驶。`);setTimeout(()=>$('trainingProgress').classList.add('hidden'),1800);}
 }
 function beginEditor(){
  if(training)return;save();running=false;clearHeld();editing=true;editOrigin=mapIndex;draft=E.serializeMap(map);undo=[];paintPointer=null;
@@ -124,7 +140,7 @@ function endEditor(saveChanges){
   if(draft.start[0]===draft.goal[0]&&draft.start[1]===draft.goal[1]){toast('入口和出口需要放在不同位置。');return;}
   const checked=E.makeMap(3,draft),s=E.initial(checked);if(!checked.roads.has(E.key(...checked.start))||!checked.roads.has(E.key(...checked.goal))||!checked.dist.has(`${s.x},${s.y},${s.d}`)){toast('入口还不能到达出口，请补齐道路或调整入口朝向。');return;}
   for(const k of checked.bridges){const[x,y]=k.split(',').map(Number);if(!E.DIRS.every(([dx,dy])=>checked.roads.has(E.key(x+dx,y+dy)))){toast('高架桥需要放在四个方向都有道路的十字交叉处。');return;}}
-  persist('apex-custom-track-v2',draft);persist('apex-racing-v2-3',null);
+  persist('apex-custom-track-v2',draft);persist('apex-vision-v3-3',null);
  }
  editing=false;paintPointer=null;draft=null;undo=[];$('editor').classList.add('hidden');document.querySelector('.track-panel').classList.remove('editing');locked(false);$('train').disabled=false;init(saveChanges?3:editOrigin);if(saveChanges)toast('自定义赛道已保存，新路线可以重新训练。');
 }
@@ -165,10 +181,12 @@ function releaseAll(){clearHeld();if(running){running=false;update();}}
 window.addEventListener('blur',releaseAll);document.addEventListener('visibilitychange',()=>{if(document.hidden)releaseAll();});
 $('exploration').oninput=e=>$('exploreValue').textContent=e.target.value+'%';$('mapSelect').onchange=e=>{save();init(Number(e.target.value));toast('已切换赛道。');};
 $('routeToggle').onclick=()=>{routeVisible=!routeVisible;$('routeToggle').setAttribute('aria-pressed',routeVisible);drawReference();};
-$('clearTraining').onclick=()=>{if(training||editing)return;learner=new E.Learner(map);save();reset();stats();toast('当前赛道的学习记录已清空。');};
+$('clearTraining').onclick=()=>{if(training||editing)return;learner=new E.VisionLearner();save();reset();stats();toast('当前赛道的视野驾驶经验已清空。');};
 $('help').onclick=()=>{running=false;clearHeld();update();$('helpDialog').showModal();};$('closeHelp').onclick=$('gotIt').onclick=()=>$('helpDialog').close();
 $('helpDialog').onclick=e=>{if(e.target===$('helpDialog')){const r=e.target.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)e.target.close();}};
 for(const k of ['maxSpeed','acceleration','steering']){$(k).value=config[k];$(k+'Value').textContent=config[k];$(k).oninput=e=>{config[k]=Number(e.target.value);$(k+'Value').textContent=config[k];persist('apex-car-v2',config);};}
 $('carColor').value=config.color;$('carStyle').value=config.style;$('carColor').oninput=e=>{config.color=e.target.value;persist('apex-car-v2',config);$('carLayer').replaceChildren();drawDynamic();};$('carStyle').onchange=e=>{config.style=e.target.value;persist('apex-car-v2',config);$('carLayer').replaceChildren();drawDynamic();};
+$('visionToggle').onchange=e=>{showVision=e.target.checked;drawVision();};
+$('visionRange').oninput=e=>{visionRange=Number(e.target.value);$('visionRangeValue').textContent=visionRange;decision=null;learner.buffer=[];drawVision();};
 window.addEventListener('beforeunload',save);init(0);requestAnimationFrame(frame);
 })();
