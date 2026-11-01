@@ -82,6 +82,7 @@ function drawVision(){
 }
 const actionNames={straight:['直行','→'],accelerate:['持续加速','↑'],decelerate:['持续减速','↓'],left:['持续左转','↰'],right:['持续右转','↱']};
 function update(){
+ updateSurvival();
  $('aiMode').classList.toggle('active',mode==='ai');$('manualMode').classList.toggle('active',mode==='manual');$('aiMode').setAttribute('aria-pressed',mode==='ai');$('manualMode').setAttribute('aria-pressed',mode==='manual');
  const issue=E.drivingIssue(map),warning=E.mapIssue(map);$('trackNotice').classList.toggle('hidden',editing||!warning);$('trackIssue').textContent=warning+(!issue?'；仍可尝试驾驶和训练':'');
  $('start').disabled=training||editing||!!issue;$('train').disabled=editing||!!issue||!!trainingTask?.stop;$('retrain').disabled=editing||!!issue;$('releaseControls').disabled=training||editing||!!issue;$('routeToggle').disabled=editing||!!warning;document.querySelectorAll('[data-action]').forEach(b=>b.disabled=training||editing||!!issue);
@@ -98,24 +99,26 @@ function update(){
  $('actionHint').textContent=held.size?'持续执行：'+[...held].map(a=>actionNames[a][0]).join(' + ')+(latched.size?' · 再点同一按钮或「松开全部」停止施加动作':''):'轻点保持动作，再点松开；长按与键盘松手后保持当前车速和方向。';
 }
 function stats(){
+ updateSurvival();
  const n=learner.episodes;$('episodes').innerHTML=n.toLocaleString()+' <small>轮</small>';const rate=learner.results.length?Math.round(100*learner.results.reduce((a,b)=>a+b,0)/learner.results.length):null;$('successRate').innerHTML=(rate??'—')+' <small>%</small>';$('bestTime').innerHTML=(learner.best===null?'—':learner.best.toFixed(1))+' <small>秒</small>';$('policyStatus').textContent=n?'已学习 '+n.toLocaleString()+' 轮':'尚未训练';
  const distances=learner.distances,average=distances.length?distances.reduce((a,b)=>a+b,0)/distances.length:0;$('learningNote').innerHTML=n?'最近 '+distances.length+' 轮平均行驶 '+average.toFixed(2)+' 格。<br><span>已学习 '+n.toLocaleString()+' 轮，继续观察与训练。</span>':'从射线距离开始积累驾驶经验。<br><span>先训练，再观察 Q 值怎样影响动作。</span>';
  const h=learner.history,sl=$('sparkline');sl.replaceChildren();if(h.length>1){const d=h.map((v,i)=>`${i?'L':'M'}${(i/(h.length-1)*108+2).toFixed(1)},${(36-v*30).toFixed(1)}`).join(' ');svg('path',{d:d+' L110 40 L2 40Z',fill:'#eff5e4'},sl);svg('path',{d,fill:'none',stroke:'#97b66b','stroke-width':1.7},sl);}drawVision();
 }
+function updateSurvival(){$('survivalCard').classList.toggle('hidden',learner.hasCleared);$('survivalInline').classList.toggle('hidden',learner.hasCleared);document.querySelector('.stats-row').classList.toggle('has-survival',!learner.hasCleared);$('longestSurvival').innerHTML=learner.longestSurvival.toFixed(1)+' <small>秒</small>';$('longestSurvivalLive').textContent=learner.longestSurvival.toFixed(1)+' 秒';}
 
 function finish(won,reason){
  if(state.done)return;state.done=true;state.won=won;state.reason=reason;repeatDelay=.65;
- if(mode==='ai'){learner.record(state);save();stats();}
+ if(mode==='ai')learner.record(state);else learner.observeSurvival(state);save();stats();
  $('result').classList.remove('hidden');$('result').innerHTML=(won?'⚑ 成功抵达出口！':'↺ '+reason)+'<small>'+state.distance.toFixed(2)+' 格 · '+state.time.toFixed(1)+' 秒'+($('autoRepeat').checked?' · 即将自动开始下一轮':' · 可重置后继续')+'</small>';
  if(!$('autoRepeat').checked)running=false;clearHeld();update();
 }
 function advance(dt){
  if(mode==='manual'){
   const next=E.advanceManual(map,state,{throttle:held.has('accelerate')?1:0,brake:held.has('decelerate')?1:0,steer:(held.has('right')?1:0)-(held.has('left')?1:0)},dt,config);
-  const done=next.done;state=next;if(done){state.done=false;finish(next.won,next.reason);}return;
+  const done=next.done;state=next;learner.observeSurvival(state);if(done){state.done=false;finish(next.won,next.reason);}return;
  }
  if(!decision){const seen=E.sense(map,state,visionRange);decision={before:state,observation:seen,action:learner.choose(seen,.02)};decisionTicks=0;}
- state=E.advanceManual(map,state,E.CONTROLS[decision.action],dt,config);decisionTicks++;
+ state=E.advanceManual(map,state,E.CONTROLS[decision.action],dt,config);learner.observeSurvival(state);decisionTicks++;
  if(decisionTicks>=8||state.done){const reward=E.rewardFor(map,decision.before,state,visited),seen=E.sense(map,state,visionRange);learner.learn(decision.observation,decision.action,seen,reward,state.done);decision=null;decisionTicks=0;}
  if(state.done){const won=state.won,reason=state.reason;state.done=false;finish(won,reason);}
 }
@@ -189,7 +192,7 @@ $('fixMap').onclick=beginEditor;
 function applyDraftSize(){if(!editing)return false;if(!$('mapWidth').reportValidity()||!$('mapHeight').reportValidity())return false;const width=Number($('mapWidth').value),height=Number($('mapHeight').value);if(width===draft.width&&height===draft.height)return true;undo.push(JSON.stringify(draft));draft=E.resizeMap(draft,width,height);rebuildDraft();$('editorHint').textContent=`已调整为 ${draft.width} 列 × ${draft.height} 行；边界外的内容已裁掉，可撤销恢复。`;return true;}
 $('applySize').onclick=applyDraftSize;
 for(const [id,field]of [['removeStart','start'],['removeGoal','goal']])$(id).onclick=()=>{if(!editing||!draft[field])return;undo.push(JSON.stringify(draft));draft[field]=null;rebuildDraft();$('editorHint').textContent=field==='start'?'入口已擦除。选择「入口」后点击新位置，或先保存草稿。':'出口已擦除。选择「出口」后点击新位置，或先保存草稿。';};
-$('start').onclick=start;$('reset').onclick=()=>{if(!training&&!editing)reset();};$('train').onclick=()=>train(false);$('retrain').onclick=()=>train(true);$('releaseControls').onclick=()=>{clearHeld();refreshHeld();};
+$('start').onclick=start;$('reset').onclick=()=>{if(!training&&!editing){save();reset();stats();}};$('train').onclick=()=>train(false);$('retrain').onclick=()=>train(true);$('releaseControls').onclick=()=>{clearHeld();refreshHeld();};
 $('aiMode').onclick=()=>setMode('ai');$('manualMode').onclick=()=>setMode('manual');
 document.querySelectorAll('[data-action]').forEach(b=>{
  b.addEventListener('pointerdown',e=>{if(e.button>0||!takeControl())return;e.preventDefault();const a=b.dataset.action,wasLatched=latched.has(a);latched.delete(a);clearOpposite(a);pointerPresses.set(e.pointerId,{a,wasLatched,at:performance.now()});b.setPointerCapture(e.pointerId);pointers.set(e.pointerId,a);refreshHeld();});

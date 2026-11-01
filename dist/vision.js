@@ -41,7 +41,7 @@ class VisionEnvironment{
  step(action){const before=this.state;let s=before;for(let i=0;i<8&&!s.done;i++)s=E.advanceManual(this.map,s,controls[action],1/120,this.config);this.state=s;const reward=rewardFor(this.map,before,s,this.visited);return {observation:this.observe(),reward,done:s.done};}
 }
 class VisionLearner{
- constructor(data){this.q=data?.q||{};this.episodes=data?.episodes||0;this.results=data?.results||[];this.best=data?.best??null;this.history=data?.history||[];this.distances=data?.distances||[];this.buffer=[];this.lastReward=0;}
+ constructor(data){this.q=data?.q||{};this.episodes=data?.episodes||0;this.results=data?.results||[];this.best=data?.best??null;this.history=data?.history||[];this.distances=data?.distances||[];this.longestSurvival=Number.isFinite(data?.longestSurvival)?Math.max(0,data.longestSurvival):0;this.hasCleared=!!data?.hasCleared||this.best!==null||this.results.includes(1);this.buffer=[];this.lastReward=0;}
  values(observation){const k=observationKey(observation);return this.q[k]||(this.q[k]=[.02,0,0,0,0]);}
  choose(observation,epsilon=0){if(Math.random()<epsilon)return ACTIONS[Math.floor(Math.random()*ACTIONS.length)];const q=this.values(observation),m=Math.max(...q),choices=q.map((v,i)=>v===m?i:-1).filter(i=>i>=0);return ACTIONS[choices[Math.floor(Math.random()*choices.length)]];}
  learn(o,a,next,reward,done){
@@ -51,9 +51,10 @@ class VisionLearner{
   for(let i=this.buffer.length-1;i>=0;i--){const t=this.buffer[i],row=this.q[t.key],target=t.reward+(t.done?0:.98*Math.max(...this.q[t.nextKey]));row[t.index]+=.18*(target-row[t.index]);}
   if(done)this.buffer=[];
  }
- record(s){this.buffer=[];this.episodes++;this.results.push(s.won?1:0);if(this.results.length>100)this.results.shift();this.distances.push(s.distance);if(this.distances.length>100)this.distances.shift();if(s.won&&(this.best===null||s.time<this.best))this.best=s.time;if(this.episodes%20===0){this.history.push(this.results.reduce((a,b)=>a+b,0)/this.results.length);if(this.history.length>40)this.history.shift();}}
+ observeSurvival(s){if(Number.isFinite(s.time)&&s.time>=0)this.longestSurvival=Math.max(this.longestSurvival,s.time);if(s.won){this.hasCleared=true;if(Number.isFinite(s.time)&&(this.best===null||s.time<this.best))this.best=s.time;}}
+ record(s){this.observeSurvival(s);this.buffer=[];this.episodes++;this.results.push(s.won?1:0);if(this.results.length>100)this.results.shift();this.distances.push(s.distance);if(this.distances.length>100)this.distances.shift();if(this.episodes%20===0){this.history.push(this.results.reduce((a,b)=>a+b,0)/this.results.length);if(this.history.length>40)this.history.shift();}}
  episode(map,config,epsilon=.2,range=4){this.buffer=[];const env=new VisionEnvironment(map,config,range);let o=env.observe();while(!env.state.done){const a=this.choose(o,epsilon),r=env.step(a);this.learn(o,a,r.observation,r.reward,r.done);o=r.observation;}this.record(env.state);return env.state;}
- serialize(){return {q:this.q,episodes:this.episodes,results:this.results,best:this.best,history:this.history,distances:this.distances};}
+ serialize(){return {q:this.q,episodes:this.episodes,results:this.results,best:this.best,history:this.history,distances:this.distances,longestSurvival:this.longestSurvival,hasCleared:this.hasCleared};}
 }
 Object.assign(E,{VISION_OFFSETS:OFFSETS,CONTROL_DT:DT,CONTROLS:controls,sense,observationKey,rewardFor,VisionEnvironment,VisionLearner});
 })();
