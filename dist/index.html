@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f5f6f2"><title>APEX · AI 赛车训练场</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<header class="header"><a class="brand" href="./"><span class="brand-mark">A<span></span></span>APEX<span class="brand-sub">AI 赛车实验室</span></a><div class="header-right"><span class="local-dot"></span>本地学习 · 无需联网<span class="version">LAB / 01</span></div></header>
+<main>
+<div class="page-heading"><div><div class="eyebrow">LEARN. DRIVE. EVOLVE.</div><h1>让 AI，学会抵达。</h1><p>从第一次探索，到找到自己的路线。每一格，都是一次学习。</p></div><button id="help" class="button help-button"><span>?</span> 玩法说明</button></div>
+<div class="workspace">
+<section class="track-panel panel">
+<div class="panel-top"><div class="section-title"><span class="green-square"></span>赛道实验场 <span class="small-label">LIVE SIMULATION</span></div><div class="map-select"><label for="mapSelect">赛道</label><select id="mapSelect"><option value="0">01 · 立交试验场</option><option value="1">02 · 城市交叉口</option><option value="2">03 · 环线挑战</option></select></div></div>
+<div class="map-wrap"><div class="map-meta"><span><i class="status-dot"></i><span id="runStatus">等待出发</span></span><span>17 × 11 网格 <b>·</b> 北 ↑</span></div><svg id="track" viewBox="0 0 850 550" role="img" aria-label="赛车训练地图：绿色入口、棋盘格出口和道路"></svg><div class="map-bottom"><div class="legend"><span><i class="entry"></i>入口</span><span><i class="exit"></i>出口</span><span><i class="bridge"></i>高架桥</span><span><i class="trail"></i>行驶轨迹</span></div><button class="icon-button" id="routeToggle" aria-pressed="false">⌁ 参考路线</button></div><div id="result" class="result hidden" role="status"></div></div>
+<div class="telemetry"><div><span class="metric-label">当前速度</span><strong id="speed">1.0 <small>格 / 秒</small></strong></div><div><span class="metric-label">本轮用时</span><strong id="elapsed">00:00<small>.0</small></strong></div><div><span class="metric-label">已行驶</span><strong id="steps">0 <small>格</small></strong></div><div><span class="metric-label">当前动作</span><strong id="action" class="action-metric">等待指令 <span>—</span></strong></div></div>
+<div class="track-footer"><span><span class="key">Space</span> 开始 / 暂停 <span class="key">R</span> 重置本轮</span><span id="coordinates">位置 (0, 8) · 朝东 · 地面</span></div>
+</section>
+<aside class="control-panel panel">
+<div class="control-title"><h2>驾驶控制台</h2><span class="chip">AGENT 01</span></div>
+<div class="segmented"><button id="aiMode" class="active">AI 自动驾驶</button><button id="manualMode">手动驾驶</button></div>
+<div class="control-section"><div class="label-row"><h3 id="modeTitle">训练你的赛车</h3><span id="policyStatus" class="subtle">尚未训练</span></div><p class="description" id="modeDesc">让 AI 反复探索赛道，从奖励与碰撞中学习，找到通往出口的路。</p>
+<button id="start" class="button primary"><span>▶</span> 开始驾驶</button><div class="button-row"><button id="step" class="button secondary">↦ 单步前进</button><button id="reset" class="button secondary">↺ 重置本轮</button></div></div>
+<div class="control-section"><div class="label-row"><h3>动作空间</h3><span class="subtle">4 个可执行动作</span></div><div class="action-grid"><button data-action="accelerate"><span>↑</span><b>加速</b><kbd>W</kbd></button><button data-action="decelerate"><span>↓</span><b>减速</b><kbd>S</kbd></button><button data-action="left"><span>↰</span><b>左转</b><kbd>A</kbd></button><button data-action="right"><span>↱</span><b>右转</b><kbd>D</kbd></button></div><p class="micro" id="actionHint">AI 会自动决策，也可点击动作临时接管。</p></div>
+<div class="control-section training-section"><div class="label-row"><h3>学习设置</h3><span class="algorithm">Q-LEARNING</span></div><div class="label-row slider-label"><label for="exploration">探索率 <span title="训练时随机尝试的概率">ⓘ</span></label><output id="exploreValue">25%</output></div><input id="exploration" type="range" min="5" max="80" value="25"><div class="range-labels"><span>利用经验</span><span>探索未知</span></div><button id="train" class="button train-button">✧ 训练 500 轮 <span>→</span></button><div class="training-progress hidden" id="trainingProgress"><div><i id="progressBar"></i></div><span id="progressText">准备训练…</span></div></div>
+<div class="learning-summary"><span class="spark-icon">↗</span><p id="learningNote">每一次尝试，都让下一次更好。<br><span>先训练，再看看 AI 学到了什么。</span></p></div>
+</aside>
+</div>
+<section class="stats-row"><div class="stat-card"><span class="stat-icon">◷</span><div><span class="metric-label">累计训练</span><strong id="episodes">0 <small>轮</small></strong></div><span class="stat-tag">持续进化</span></div><div class="stat-card"><span class="stat-icon">⚑</span><div><span class="metric-label">最近 100 轮成功率</span><strong id="successRate">— <small>%</small></strong></div><svg id="sparkline" viewBox="0 0 112 40" aria-label="训练成功率趋势"></svg></div><div class="stat-card"><span class="stat-icon">⌁</span><div><span class="metric-label">最快抵达</span><strong id="bestTime">— <small>秒</small></strong></div><span class="stat-tag">越快越好</span></div><button id="clearTraining" class="clear-training">↺ 清空学习记录<span>让 AI 从零开始</span></button></section>
+<footer class="page-footer"><span><b>APEX</b> / 从探索到直觉</span><span>默认每秒 1 格 · 转弯前请降速 · 高架交汇处只能直行</span><span class="footer-live"><i></i>浏览器本地运行</span></footer>
+</main>
+<dialog id="helpDialog"><button id="closeHelp" class="dialog-close" aria-label="关闭说明">×</button><span class="eyebrow">QUICK START</span><h2>从入口出发，向出口学习。</h2><ol><li><b>先训练：</b>点击「训练 500 轮」，AI 用 Q-learning 更新状态与动作的价值。可以反复训练。</li><li><b>看它驾驶：</b>点击「开始驾驶」。未训练时会随机探索，训练后使用已学到的策略。</li><li><b>亲自试试：</b>切换「手动驾驶」，用 W / S 加减速，A / D 左右转。转向在下一格执行，左右相对于车头方向。</li><li><b>赛道规则：</b>初始速度 1 格/秒，可调为 0.5、1、2、3 格/秒。速度超过 1 时转弯会失控；高架桥中心只能直行，上下道路不相通。</li><li><b>重新开始：</b>「重置本轮」保留学习；「清空学习记录」清除当前地图的 AI 经验。切换地图会自动保存各自的进度。</li></ol><p class="micro">奖励：抵达 +120；驶出道路或高速转弯 −35；沿道路接近出口获得小额奖励。每轮最多 180 步。所有学习在此浏览器完成。</p><button id="gotIt" class="button primary">明白了，出发 →</button></dialog>
+<div id="toast" class="toast" role="status"></div>
+<script src="engine.js"></script><script src="app.js"></script>
+</body></html>
