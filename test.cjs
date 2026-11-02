@@ -107,7 +107,7 @@ assert(Math.abs(traffic.rays[3].distance-.74)<1e-10,'Front ray must stop at the 
 assert.notEqual(E.observationKey(traffic),E.observationKey(E.sense(map,observer)),'Traffic must influence the policy state');
 assert.equal(E.policyKey(traffic),E.policyKey(E.sense(map,observer)),'Visible ghost cars must not hide the road geometry used to drive the champion policy');
 assert.equal(traffic.rays[3].roadDistance,4,'Keep a separate road scan while still visibly detecting the front car');
-const yielding={...observer,speed:0,time:2.1};E.rewardFor(map,{...observer,speed:0,time:0},yielding,new Set(),traffic);assert(yielding.done,'Non-blocking vehicles must not create a reward exemption for indefinite parking');
+const yielding={...observer,speed:0,time:10.1};E.rewardFor(map,{...observer,speed:0,time:0},yielding,new Set(),traffic);assert(yielding.done,'Actual stationary parking must end after ten seconds even when ghost traffic is visible');
 assert.equal(E.sense(map,observer,4,[observer]).rays[3].kind,'clear','A car must not see itself');
 const underpass={...initial,x:6,y:5,angle:Math.PI/2,carId:2,bridgeLock:{x:6,y:5,axis:'v'}},overpass={...initial,x:6,y:5,carId:3,bridgeLock:{x:6,y:5,axis:'h'}};
 assert(!E.sameDeck(map,underpass,overpass));
@@ -224,12 +224,39 @@ remembered.values(seen)[3]=20;
 remembered.learn(next,'straight',next,.1,false);
 assert(remembered.values(seen)[3]<20,'A stored earlier-episode failure must be relearned on a later episode');
 assert(remembered.replays>=2);
+const oldRewards=JSON.parse(JSON.stringify(longMemory.serialize()));
+for(const t of [...oldRewards.experience,...oldRewards.outcomes])delete t.rewardVersion;
+const oldRewardLearner=new E.VisionLearner(oldRewards),oldPenalty=oldRewardLearner.values(seen)[3],oldReplayCount=oldRewardLearner.replays;
+oldRewardLearner.learn(next,'straight',next,.1,false);
+assert.equal(oldRewardLearner.values(seen)[3],oldPenalty,'Obsolete low-speed/time-limit rewards must not be replayed after the rules change');
+assert.equal(oldRewardLearner.replays,oldReplayCount);assert.equal(oldRewardLearner.experience.length,2,'Keep old memory records and Q values rather than silently clearing the model');
 const oldQ=new E.VisionLearner({q:{'1222221:4:2':[7,2,1,0,-1]}});
 assert(oldQ.q['1222221:4:2'],'Legacy Q records must remain present rather than being erased');
 const migrated=new E.VisionLearner({q:{'1111111:4:2':[7,2,1,0,-1]}});
 const legacyView={...seen,goalBearing:0,speed:1,rays:seen.rays.map(r=>({...r,distance:.4,kind:'edge'}))};
 assert.deepEqual(migrated.values(legacyView),[7,2,1,0,-1],'New detailed states inherit the prior coarse Q experience');
 const environment = new E.VisionEnvironment(map, config);
+const slowBefore={...initial,time:60,speed:.01},slowAfter={...slowBefore,x:initial.x+.01,distance:.01,time:61,idleTime:0};
+const fastAfter={...slowAfter,speed:2,time:60.01};
+const slowReward=E.rewardFor(map,slowBefore,slowAfter,new Set()),fastReward=E.rewardFor(map,slowBefore,fastAfter,new Set());
+assert.equal(slowAfter.done,false,'A car still moving after 45 seconds must not time out');
+assert.equal(slowAfter.idleTime,0,'Any actual movement must reset the parking timer regardless of speed');
+assert(Math.abs(slowReward-fastReward)<1e-10,'The same progress must not be penalized merely for taking longer or moving more slowly');
+const stopAndGo=new E.VisionEnvironment(map,config);stopAndGo.state.speed=0;
+for(let i=0;i<135;i++)stopAndGo.step('straight');
+assert(!stopAndGo.state.done,'A brief real stop must leave time to accelerate again');
+stopAndGo.step('accelerate');assert.equal(stopAndGo.state.idleTime,0);assert(!stopAndGo.state.done);
+const trulyStopped=new E.VisionEnvironment(map,config);trulyStopped.state.speed=0;
+while(!trulyStopped.state.done)trulyStopped.step('straight');
+assert(trulyStopped.state.time>=10);assert.equal(trulyStopped.state.reason,'连续 10 秒没有移动');
+// Brake to below the former .18 cutoff, coast, turn through 90 degrees and
+// reach the goal well past the former 45-second deadline.
+const slowRoads=[];for(let x=1;x<=7;x++)slowRoads.push(`${x},5`);for(let y=2;y<5;y++)slowRoads.push(`7,${y}`);
+const slowMap=E.makeMap(3,{width:10,height:8,roads:slowRoads,bridges:[],start:[1,5],goal:[7,2],startDir:0}),slowTurn=new E.VisionEnvironment(slowMap,config);
+let turnPhase='brake',slowSteps=0;
+while(!slowTurn.state.done&&slowSteps++<4000){const s=slowTurn.state;let action='straight';if(turnPhase==='brake'){if(s.speed>.12)action='decelerate';else turnPhase='approach';}if(turnPhase==='approach'&&s.x>=6.97)turnPhase='turn';if(turnPhase==='turn'){if(s.angle>-Math.PI/2)action='left';else turnPhase='finish';}slowTurn.step(action);}
+assert(slowTurn.state.won,'A physically valid low-speed cornering run must be allowed to finish');
+assert(slowTurn.state.time>45);assert(slowTurn.state.speed<.18);assert.equal(slowTurn.state.idleTime,0);
 let physical = E.continuousInitial(map);
 for (let i = 0; i < 8; i++) physical = E.advanceManual(map, physical, E.CONTROLS.accelerate, 1 / 120, config);
 environment.step('accelerate');

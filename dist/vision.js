@@ -32,13 +32,16 @@ function legacyObservationKey(o){const bin=v=>v<.25?0:v<.65?1:2;const base=o.ray
 function observationKey(o){const bin=v=>v<.16?0:v<.28?1:v<.42?2:v<.65?3:v<1?4:v<1.6?5:v<2.6?6:7,traffic=o.rays.reduce((mask,r,i)=>r.kind==='car'?mask|(1<<i):mask,0);return 'm4:'+o.rays.map(r=>bin(r.distance)).join('')+':'+Math.floor((o.goalBearing+Math.PI)/(Math.PI/8))%16+':'+(o.speed<.2?0:o.speed<.8?1:o.speed<1.6?2:o.speed<3?3:4)+(traffic?':cars'+traffic:'');}
 function policyKey(o){return observationKey({...o,rays:o.rays.map(r=>({...r,distance:r.roadDistance??r.distance,kind:'edge'}))});}
 function rewardFor(map,before,after,visited){
- after.idleTime=after.speed<.18?(before.idleTime||0)+(after.time-before.time):0;
- if(!after.done&&after.idleTime>=2){after.done=true;after.reason='停车过久，重新尝试';}
- if(!after.done&&after.time>=45){after.done=true;after.reason='本轮达到 45 秒，继续训练再试';}
+ const moved=after.x!==before.x||after.y!==before.y;
+ after.idleTime=moved?0:(before.idleTime||0)+(after.time-before.time);
+ if(!after.done&&after.idleTime>=10){after.done=true;after.reason='连续 10 秒没有移动';}
+ // Bound repeated circling by actual travel, never by how slowly a car drives.
+ const repeating=after.distance>Math.max(100,map.roads.size*8);
+ if(!after.done&&repeating){after.done=true;after.reason='重复行驶路程过多，重新探索';}
  const old=Math.hypot(before.x-map.goal[0],before.y-map.goal[1]),dist=Math.hypot(after.x-map.goal[0],after.y-map.goal[1]);
- let reward=3*(old-dist)-.018-(after.speed<.18?.1:0);
+ let reward=3*(old-dist)-.02*Math.max(0,after.distance-before.distance);
  const cell=Math.floor(after.x*2)+','+Math.floor(after.y*2);if(!visited.has(cell)){visited.add(cell);reward+=.08;}
- if(after.done)reward+=after.won?80:after.time>=45?-5:-15;
+ if(after.done)reward+=after.won?80:repeating?-5:-15;
  return reward;
 }
 class VisionEnvironment{
@@ -62,10 +65,10 @@ class VisionLearner{
   if(done)stream.length=0;
   // Replay earlier episodes as well as the current one. Each car's eligibility
   // trace stays private; only its own real transitions enter each driver’s durable memory.
-  const replay=t=>{if(!t)return;const r=this.q[t.key],n=this.q[t.nextKey];if(!r||!n)return;r[t.index]+=.06*(t.reward+(t.done?0:.98*Math.max(...n))-r[t.index]);this.replays++;};
+  const replay=t=>{if(!t||t.rewardVersion!==2)return;const r=this.q[t.key],n=this.q[t.nextKey];if(!r||!n)return;r[t.index]+=.06*(t.reward+(t.done?0:.98*Math.max(...n))-r[t.index]);this.replays++;};
   for(let i=0;i<2&&this.experience.length;i++)replay(this.experience[Math.floor(Math.random()*this.experience.length)]);
   if(this.transitions%4===0&&this.outcomes.length)replay(this.outcomes[Math.floor(Math.random()*this.outcomes.length)]);
-  const transition={key,index,nextKey,reward,done};this.transitions++;
+  const transition={key,index,nextKey,reward,done,rewardVersion:2};this.transitions++;
   if(this.experience.length<this.memoryLimit)this.experience.push(transition);else{const slot=Math.floor(Math.random()*this.transitions);if(slot<this.memoryLimit)this.experience[slot]=transition;}
   if(done){this.terminalTransitions++;if(this.outcomes.length<this.outcomeLimit)this.outcomes.push(transition);else{const slot=Math.floor(Math.random()*this.terminalTransitions);if(slot<this.outcomeLimit)this.outcomes[slot]=transition;}}
  }
