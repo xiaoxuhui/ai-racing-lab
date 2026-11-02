@@ -25,6 +25,10 @@ assert.equal(restoredSurvival.longestSurvival,8);
 assert.equal(restoredSurvival.hasCleared,true);
 assert.equal(new E.VisionLearner({best:3.5}).hasCleared,true,'Previously completed tracks should hide the new statistic immediately');
 assert.equal(new E.VisionLearner().hasCleared,false,'From-zero training should restore the survival statistic');
+const distanceRecord=new E.VisionLearner();distanceRecord.observeSurvival({won:true,time:1,distance:12});distanceRecord.observeSurvival({won:true,time:100,distance:8});
+assert.equal(distanceRecord.bestDistance,8,'A slower but shorter successful route must improve the distance record');
+assert.equal(new E.VisionLearner(JSON.parse(JSON.stringify(distanceRecord.serialize()))).bestDistance,8);
+assert.equal(new E.VisionLearner({best:3.5}).bestDistance,null,'Do not invent a distance record from an old time record');
 for(const angle of [0,37,90,180,270,359]){
  const rotated=E.makeMap(3,{...E.serializeMap(map),startAngle:angle});
  assert(Math.abs(E.continuousInitial(rotated).angle-angle*Math.PI/180)<1e-12,'Departure direction must use the exact angle rather than snap to a cardinal');
@@ -238,6 +242,20 @@ assert.deepEqual(migrated.values(legacyView),[7,2,1,0,-1],'New detailed states i
 const environment = new E.VisionEnvironment(map, config);
 const slowBefore={...initial,time:60,speed:.01},slowAfter={...slowBefore,x:initial.x+.01,distance:.01,time:61,idleTime:0};
 const fastAfter={...slowAfter,speed:2,time:60.01};
+// The entire path, future-value discount, and champion score must be spatial:
+// changing elapsed time or subdividing the same path cannot change them.
+function pathReward(parts,duration){const visited=new Set();let total=0,before={...initial};for(let i=1;i<=parts;i++){const after={...initial,x:initial.x+2*i/parts,distance:2*i/parts,time:duration*i/parts,speed:2/duration};total+=E.rewardFor(map,before,after,visited);before=after;}return {total,visited:[...visited].sort()};}
+const quickPath=pathReward(4,1),slowPath=pathReward(400,100);
+assert(Math.abs(quickPath.total-slowPath.total)<1e-9,'A slower/subdivided traversal of the same path must earn exactly the same total reward');
+assert.deepEqual(quickPath.visited,slowPath.visited,'Fast cars must not skip spatial exploration credit');
+assert(Math.abs(E.distanceDiscount(2)-Math.pow(E.distanceDiscount(.005),400))<1e-12,'Discount must compose by distance, independent of action count');
+assert.equal(E.distanceDiscount(0),1,'Standing still must not apply an implicit per-frame discount');
+const shortSlow={...initial,won:true,distance:8,time:1000},longFast={...initial,won:true,distance:12,time:1};
+assert(E.compareScore(E.distanceScore(shortSlow,20,map),E.distanceScore(longFast,20,map))>0,'A shorter successful route must beat a faster longer route');
+assert.deepEqual(E.distanceScore(shortSlow,20,map),E.distanceScore({...shortSlow,time:1},20,map),'Time must not break ties in champion selection');
+const parked={...initial,speed:0,time:11};
+assert.equal(E.rewardFor(map,{...initial,speed:0},parked,new Set()),0,'Stationary restart is a watchdog reset, not a timed reward penalty');
+assert(parked.truncated);
 const slowReward=E.rewardFor(map,slowBefore,slowAfter,new Set()),fastReward=E.rewardFor(map,slowBefore,fastAfter,new Set());
 assert.equal(slowAfter.done,false,'A car still moving after 45 seconds must not time out');
 assert.equal(slowAfter.idleTime,0,'Any actual movement must reset the parking timer regardless of speed');
@@ -276,10 +294,17 @@ for (let i = 0; i < 30; i++) {
   randomDistance += env.state.distance;
 }
 const learner = new E.VisionLearner();
-for (let i = 0; i < 5000; i++) learner.episode(map, config, Math.max(.03, .25 / (1 + learner.episodes / 2000)));
+let learnedChampion=null;
+for (let i = 0; i < 5000; i++){
+ learner.episode(map, config, Math.max(.03, .25 / (1 + learner.episodes / 2000)));
+ if((i+1)%500===0){const candidate=E.evaluatePolicy(learner.serialize(),map,config);if(!learnedChampion||E.compareScore(candidate.score,learnedChampion.score)>0)learnedChampion=candidate;}
+}
 const evaluation = new E.VisionEnvironment(map, config);
-while (!evaluation.state.done) evaluation.step(learner.choose(evaluation.observe(), 0));
-assert(evaluation.state.distance > randomDistance / 30 * 3, 'Learning must improve travel beyond the random baseline');
+// Evaluate the retained champion, as the app does, rather than the mutable last
+// exploratory policy. No random tie-breaking is used in elite demonstrations.
+const retainedPolicy=new E.VisionLearner(learnedChampion.model);
+while (!evaluation.state.done){const q=retainedPolicy.values(evaluation.observe());evaluation.step(E.ACTIONS[q.indexOf(Math.max(...q))]);}
+assert(evaluation.state.distance > randomDistance / 30 * 3, 'The selected trained champion must retain travel beyond the random baseline');
 assert.equal(learner.episodes, 5000);
 const restored = new E.VisionLearner(JSON.parse(JSON.stringify(learner.serialize())));
 assert.deepEqual(restored.values(seen), learner.values(seen));

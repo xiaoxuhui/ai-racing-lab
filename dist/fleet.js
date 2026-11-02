@@ -4,11 +4,12 @@
 const E=globalThis.Racing;
 const copy=value=>JSON.parse(JSON.stringify(value));
 function compareScore(a,b){if(!b)return 1;for(let i=0;i<a.length;i++)if(Math.abs(a[i]-b[i])>1e-8)return a[i]>b[i]?1:-1;return 0;}
+function distanceScore(state,coverage,map){return [state.won?1:0,state.won?-state.distance:coverage,state.won?0:-Math.hypot(state.x-map.goal[0],state.y-map.goal[1]),-state.distance];}
 function evaluatePolicy(model,map,config,range=4){
  const policy=new E.VisionLearner(copy(model)),env=new E.VisionEnvironment(map,config,range);
  while(!env.state.done){const q=policy.values(env.observe());env.step(E.ACTIONS[q.indexOf(Math.max(...q))]);}
- const s=env.state,remaining=Math.hypot(s.x-map.goal[0],s.y-map.goal[1]);
- return {score:[s.won?1:0,s.won?-s.time:env.visited.size,s.won?0:-remaining,-s.time],won:s.won,time:s.time,distance:s.distance,coverage:env.visited.size,model:policy.serialize()};
+ const s=env.state;
+ return {score:distanceScore(s,env.visited.size,map),scoreVersion:2,won:s.won,time:s.time,distance:s.distance,coverage:env.visited.size,model:policy.serialize()};
 }
 class FleetWorld{
  constructor(map,learner,config,count=8,range=4){
@@ -19,6 +20,7 @@ class FleetWorld{
  states(){return this.cars.filter(c=>c.active&&!c.state.done).map(c=>c.state);}
  observe(car){return E.sense(this.map,car.state,this.range,this.states());}
  spawn(car){
+  if(this.learner.reviewChampion)this.learner.selectChampion(this.map,this.config,this.range,true);
   if(this.learner.inheritChampion)car.learner=this.learner.inheritChampion(car.id,this.map,this.config,this.range);
   const fresh={...E.continuousInitial(this.map),carId:car.id};
   car.state=fresh;car.active=true;car.waiting=false;car.finished=false;car.decision=null;car.ticks=0;car.lastReward=0;car.visited=new Set();car.buffer=[];car.trail=[[fresh.x,fresh.y]];car.trailVersion++;car.attempts++;this.nextSpawn=this.time+.4;return true;
@@ -44,13 +46,13 @@ class FleetWorld{
    const manual=car.id===manualId;
    if(!manual&&(car.ticks>=8||car.state.done)){
     const decision=car.decision,seen=E.sense(this.map,car.state,this.range,afterStates),reward=E.rewardFor(this.map,decision.before,car.state,car.visited);
-    if(!decision.elite)car.learner.learn(decision.observation,decision.action,seen,reward,car.state.done,car.buffer);car.lastReward=reward;car.decision=null;car.ticks=0;
+    if(!decision.elite)car.learner.learn(decision.observation,decision.action,seen,reward,car.state.done,car.buffer,{distance:Math.max(0,car.state.distance-decision.before.distance),truncated:!!car.state.truncated});car.lastReward=reward;car.decision=null;car.ticks=0;
    }
    car.learner.observeSurvival(car.state);if(car.learner!==this.learner)this.learner.observeSurvival(car.state);
    const p=car.trail.at(-1),moved=p?Math.hypot(car.state.x-p[0],car.state.y-p[1]):Infinity;if(moved>.06||(car.state.done&&moved>1e-8)){car.trail.push([car.state.x,car.state.y]);if(car.trail.length>1200){const last=car.trail.length-1;car.trail=car.trail.filter((_,i)=>i%2===0||i===last);}car.trailVersion++;}
    if(car.state.done){
     car.active=false;car.finished=true;car.waiting=false;car.readyAt=this.time+.55;car.finishedAt=this.time;
-    if(!car.state.won){this.deaths++;car.lastDeath={state:{...car.state},trail:car.trail.map(p=>[...p]),attempt:car.attempts,version:++this.historyVersion};}
+    if(!car.state.won&&!car.state.truncated){this.deaths++;car.lastDeath={state:{...car.state},trail:car.trail.map(p=>[...p]),attempt:car.attempts,version:++this.historyVersion};}
     if(!manual){car.learner.record(car.state);if(car.learner!==this.learner)this.learner.record(car.state);this.learner.consider?.(car.id,car.state,car.visited.size,this.map);}car.buffer=[];
     this.events.push({id:car.id,state:{...car.state},manual});
    }
@@ -62,7 +64,7 @@ class FleetWorld{
 // followers; independent explorers keep searching for a better policy.
 class FleetLearner{
  constructor(data){
-  this.summary=new E.VisionLearner(data?.fleetVersion?data.summary:data);this.drivers=new Map();this.buffer=[];this.champion=data?.champion||null;this.applied=data?.applied||{};this.sources=data?.sources||{};this.candidates=new Map();this.lastSelection=this.summary.episodes;
+  this.summary=new E.VisionLearner(data?.fleetVersion?data.summary:data);this.drivers=new Map();this.buffer=[];this.champion=data?.champion||null;this.reviewChampion=!!this.champion&&this.champion.scoreVersion!==2;this.applied=data?.applied||{};this.sources=data?.sources||{};this.candidates=new Map();this.lastSelection=this.summary.episodes;
   if(data?.fleetVersion){for(const[id,model]of Object.entries(data.drivers||{}))this.drivers.set(Number(id),new E.VisionLearner(model));}
   else if(data){this.drivers.set(0,new E.VisionLearner(data));}
   this.summary.q={};this.summary.experience=[];this.summary.outcomes=[];
@@ -70,11 +72,11 @@ class FleetLearner{
  forCar(id){if(!this.drivers.has(id))this.drivers.set(id,new E.VisionLearner({memoryLimit:512,outcomeLimit:64}));return this.drivers.get(id);}
  observeSurvival(state){this.summary.observeSurvival(state);}
  record(state){this.summary.record(state);}
- consider(id,state,coverage,map){const score=[state.won?1:0,state.won?-state.time:coverage,state.won?0:-Math.hypot(state.x-map.goal[0],state.y-map.goal[1]),-state.time],previous=this.candidates.get(id);if(!previous||compareScore(score,previous)>0)this.candidates.set(id,score);}
+ consider(id,state,coverage,map){const score=distanceScore(state,coverage,map),previous=this.candidates.get(id);if(!previous||compareScore(score,previous)>0)this.candidates.set(id,score);}
  get selectionDue(){return this.summary.episodes-this.lastSelection>=Math.max(16,this.drivers.size*2);}
  selectChampion(map,config,range=4,force=false){
   const ids=force?[...this.drivers.keys()]:[...this.candidates].sort((a,b)=>compareScore(b[1],a[1])).slice(0,3).map(([id])=>id);
-  this.lastSelection=this.summary.episodes;this.candidates.clear();
+  this.lastSelection=this.summary.episodes;this.candidates.clear();this.reviewChampion=false;
   let best=this.champion?{...evaluatePolicy(this.champion.model,map,config,range),id:this.champion.id}:null,changed=false;
   for(const id of ids){const result=evaluatePolicy(this.forCar(id).serialize(),map,config,range);if(!best||compareScore(result.score,best.score)>0){best={...result,id};changed=true;}}
   if(changed)this.champion={...best,generation:(this.champion?.generation||0)+1};else if(this.champion&&best){const generation=this.champion.generation;this.champion={...best,generation};}
@@ -87,12 +89,12 @@ class FleetLearner{
   // Never overwrite a driver's independently improved policy with a worse one.
   if(id!==champion.id){const evaluation=evaluatePolicy(own.serialize(),map,config,range);if(compareScore(evaluatePolicy(champion.model,map,config,range).score,evaluation.score)<=0)return own;}
   const stats=own.serialize(),model=copy(champion.model);
-  for(const key of ['episodes','results','best','history','distances','longestSurvival','hasCleared','memoryLimit','outcomeLimit'])model[key]=stats[key];
+  for(const key of ['episodes','results','best','bestDistance','history','distances','longestSurvival','hasCleared','memoryLimit','outcomeLimit'])model[key]=stats[key];
   const follower=new E.VisionLearner(model);this.drivers.set(id,follower);this.sources[id]={id:champion.id,generation:champion.generation};return follower;
  }
  role(id){return this.champion?.id===id?'冠军':id%4===3?'独立探索':this.sources[id]?`学习 ${String(this.sources[id].id+1).padStart(2,'0')} 号 · 第 ${this.sources[id].generation} 代`:'等待选优';}
  serialize(){return {fleetVersion:1,summary:this.summary.serialize(),champion:this.champion,applied:this.applied,sources:this.sources,drivers:Object.fromEntries([...this.drivers].map(([id,model])=>[id,model.serialize()]))};}
 }
-for(const key of ['episodes','results','best','history','distances','longestSurvival','hasCleared'])Object.defineProperty(FleetLearner.prototype,key,{get(){return this.summary[key];}});
-Object.assign(E,{FleetWorld,FleetLearner,evaluatePolicy,compareScore});
+for(const key of ['episodes','results','best','bestDistance','history','distances','longestSurvival','hasCleared'])Object.defineProperty(FleetLearner.prototype,key,{get(){return this.summary[key];}});
+Object.assign(E,{FleetWorld,FleetLearner,evaluatePolicy,compareScore,distanceScore});
 })();

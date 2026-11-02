@@ -31,51 +31,61 @@ function sense(map,state,range=4,vehicles=[]){
 function legacyObservationKey(o){const bin=v=>v<.25?0:v<.65?1:2;const base=o.rays.map(r=>bin(r.distance)).join('')+':'+Math.floor((o.goalBearing+Math.PI)/(Math.PI/4))%8+':'+(o.speed<.2?0:o.speed<.8?1:o.speed<1.6?2:o.speed<3?3:4),traffic=o.rays.reduce((mask,r,i)=>r.kind==='car'?mask|(1<<i):mask,0);return base+(traffic?':cars'+traffic:'');}
 function observationKey(o){const bin=v=>v<.16?0:v<.28?1:v<.42?2:v<.65?3:v<1?4:v<1.6?5:v<2.6?6:7,traffic=o.rays.reduce((mask,r,i)=>r.kind==='car'?mask|(1<<i):mask,0);return 'm4:'+o.rays.map(r=>bin(r.distance)).join('')+':'+Math.floor((o.goalBearing+Math.PI)/(Math.PI/8))%16+':'+(o.speed<.2?0:o.speed<.8?1:o.speed<1.6?2:o.speed<3?3:4)+(traffic?':cars'+traffic:'');}
 function policyKey(o){return observationKey({...o,rays:o.rays.map(r=>({...r,distance:r.roadDistance??r.distance,kind:'edge'}))});}
+function distanceDiscount(distance){return Math.pow(.98,Math.max(0,distance));}
+function newlyVisited(before,after,visited){
+ if(before.x===after.x&&before.y===after.y)return 0;
+ const cuts=[0,1];
+ for(const axis of ['x','y']){const a=before[axis],b=after[axis];if(a===b)continue;for(let k=Math.floor(Math.min(a,b)*2)+1;k<=Math.floor(Math.max(a,b)*2);k++){const t=(k/2-a)/(b-a);if(t>0&&t<1)cuts.push(t);}}
+ cuts.sort((a,b)=>a-b);let count=0;
+ const add=t=>{const x=before.x+(after.x-before.x)*t,y=before.y+(after.y-before.y)*t,key=Math.floor(x*2)+','+Math.floor(y*2);if(!visited.has(key)){visited.add(key);count++;}};
+ for(let i=1;i<cuts.length;i++)add((cuts[i-1]+cuts[i])/2);add(1);return count;
+}
 function rewardFor(map,before,after,visited){
  const moved=after.x!==before.x||after.y!==before.y;
  after.idleTime=moved?0:(before.idleTime||0)+(after.time-before.time);
- if(!after.done&&after.idleTime>=10){after.done=true;after.reason='连续 10 秒没有移动';}
+ if(!after.done&&after.idleTime>=10){after.done=true;after.truncated=true;after.reason='连续 10 秒没有移动';}
  // Bound repeated circling by actual travel, never by how slowly a car drives.
  const repeating=after.distance>Math.max(100,map.roads.size*8);
  if(!after.done&&repeating){after.done=true;after.reason='重复行驶路程过多，重新探索';}
  const old=Math.hypot(before.x-map.goal[0],before.y-map.goal[1]),dist=Math.hypot(after.x-map.goal[0],after.y-map.goal[1]);
  let reward=3*(old-dist)-.02*Math.max(0,after.distance-before.distance);
- const cell=Math.floor(after.x*2)+','+Math.floor(after.y*2);if(!visited.has(cell)){visited.add(cell);reward+=.08;}
- if(after.done)reward+=after.won?80:repeating?-5:-15;
+ reward+=.08*newlyVisited(before,after,visited);
+ if(after.done&&!after.truncated)reward+=after.won?80:repeating?-5:-15;
  return reward;
 }
 class VisionEnvironment{
  constructor(map,config,range=4){this.map=map;this.config=config;this.range=range;this.state=E.continuousInitial(map);this.visited=new Set();}
  observe(){return sense(this.map,this.state,this.range);}
- step(action){const before=this.state;let s=before;for(let i=0;i<8&&!s.done;i++)s=E.advanceManual(this.map,s,controls[action],1/120,this.config);this.state=s;const reward=rewardFor(this.map,before,s,this.visited);return {observation:this.observe(),reward,done:s.done};}
+ step(action){const before=this.state;let s=before;for(let i=0;i<8&&!s.done;i++)s=E.advanceManual(this.map,s,controls[action],1/120,this.config);this.state=s;const reward=rewardFor(this.map,before,s,this.visited);return {observation:this.observe(),reward,done:s.done,distance:Math.max(0,s.distance-before.distance),truncated:!!s.truncated};}
 }
 class VisionLearner{
- constructor(data){this.memoryLimit=data?.memoryLimit||4096;this.outcomeLimit=data?.outcomeLimit||512;this.q=data?.q||{};this.episodes=data?.episodes||0;this.results=data?.results||[];this.best=data?.best??null;this.history=data?.history||[];this.distances=data?.distances||[];this.longestSurvival=Number.isFinite(data?.longestSurvival)?Math.max(0,data.longestSurvival):0;this.hasCleared=!!data?.hasCleared||this.best!==null||this.results.includes(1);this.buffer=[];this.lastReward=0;this.experience=(data?.experience||[]).slice(-this.memoryLimit);this.outcomes=(data?.outcomes||[]).slice(-this.outcomeLimit);this.transitions=Math.max(data?.transitions||0,this.experience.length);this.terminalTransitions=Math.max(data?.terminalTransitions||0,this.outcomes.length);this.replays=data?.replays||0;}
+ constructor(data){this.memoryLimit=data?.memoryLimit||4096;this.outcomeLimit=data?.outcomeLimit||512;this.q=data?.q||{};this.episodes=data?.episodes||0;this.results=data?.results||[];this.best=data?.best??null;this.bestDistance=Number.isFinite(data?.bestDistance)?data.bestDistance:null;this.history=data?.history||[];this.distances=data?.distances||[];this.longestSurvival=Number.isFinite(data?.longestSurvival)?Math.max(0,data.longestSurvival):0;this.hasCleared=!!data?.hasCleared||this.best!==null||this.results.includes(1);this.buffer=[];this.lastReward=0;this.experience=(data?.experience||[]).slice(-this.memoryLimit);this.outcomes=(data?.outcomes||[]).slice(-this.outcomeLimit);this.transitions=Math.max(data?.transitions||0,this.experience.length);this.terminalTransitions=Math.max(data?.terminalTransitions||0,this.outcomes.length);this.replays=data?.replays||0;}
  values(observation){const k=policyKey(observation);return this.q[k]||(this.q[k]=[...(this.q[observationKey(observation)]||this.q[legacyObservationKey(observation)]||[.02,0,0,0,0])]);}
  choose(observation,epsilon=0){this.lastChoiceExploratory=epsilon>0&&Math.random()<epsilon;if(this.lastChoiceExploratory)return ACTIONS[Math.floor(Math.random()*ACTIONS.length)];const q=this.values(observation),m=Math.max(...q),choices=q.map((v,i)=>v===m?i:-1).filter(i=>i>=0);return ACTIONS[choices[Math.floor(Math.random()*choices.length)]];}
- learn(o,a,next,reward,done,stream=this.buffer){
+ learn(o,a,next,reward,done,stream=this.buffer,step={distance:1}){
   this.lastReward=reward;const key=policyKey(o),nextKey=policyKey(next),index=ACTIONS.indexOf(a),row=this.values(o),nextRow=this.values(next);
   // Watkins Q(lambda): an exploratory, non-greedy action breaks earlier credit.
   // Its later failure must not blame the safe choices before that deviation.
   if(row[index]<Math.max(...row)-1e-10)stream.length=0;
   const duplicate=stream.findIndex(t=>t.key===key&&t.index===index);if(duplicate>=0)stream.splice(duplicate,1);
-  stream.push({key,index});if(stream.length>96)stream.shift();
-  const delta=reward+(done?0:.98*Math.max(...nextRow))-row[index];let eligibility=1;
-  for(let i=stream.length-1;i>=0&&eligibility>.001;i--){const t=stream[i];this.q[t.key][t.index]+=.18*delta*eligibility;eligibility*=.98*.85;}
+  const distance=Math.max(0,step.distance??1),discount=distanceDiscount(distance),terminal=done;
+  stream.push({key,index,distance});if(stream.length>96)stream.shift();
+  const delta=reward+(terminal?0:discount*Math.max(...nextRow))-row[index];let eligibility=1;
+  for(let i=stream.length-1;i>=0&&eligibility>.001;i--){const t=stream[i];this.q[t.key][t.index]+=.18*delta*eligibility;eligibility*=distanceDiscount(t.distance)*Math.pow(.85,t.distance);}
   if(done)stream.length=0;
   // Replay earlier episodes as well as the current one. Each car's eligibility
   // trace stays private; only its own real transitions enter each driver’s durable memory.
-  const replay=t=>{if(!t||t.rewardVersion!==2)return;const r=this.q[t.key],n=this.q[t.nextKey];if(!r||!n)return;r[t.index]+=.06*(t.reward+(t.done?0:.98*Math.max(...n))-r[t.index]);this.replays++;};
+  const replay=t=>{if(!t||t.rewardVersion!==3)return;const r=this.q[t.key],n=this.q[t.nextKey];if(!r||!n)return;r[t.index]+=.06*(t.reward+(t.done?0:t.discount*Math.max(...n))-r[t.index]);this.replays++;};
   for(let i=0;i<2&&this.experience.length;i++)replay(this.experience[Math.floor(Math.random()*this.experience.length)]);
   if(this.transitions%4===0&&this.outcomes.length)replay(this.outcomes[Math.floor(Math.random()*this.outcomes.length)]);
-  const transition={key,index,nextKey,reward,done,rewardVersion:2};this.transitions++;
+  const transition={key,index,nextKey,reward,done:terminal,discount,rewardVersion:3};this.transitions++;
   if(this.experience.length<this.memoryLimit)this.experience.push(transition);else{const slot=Math.floor(Math.random()*this.transitions);if(slot<this.memoryLimit)this.experience[slot]=transition;}
   if(done){this.terminalTransitions++;if(this.outcomes.length<this.outcomeLimit)this.outcomes.push(transition);else{const slot=Math.floor(Math.random()*this.terminalTransitions);if(slot<this.outcomeLimit)this.outcomes[slot]=transition;}}
  }
- observeSurvival(s){if(Number.isFinite(s.time)&&s.time>=0)this.longestSurvival=Math.max(this.longestSurvival,s.time);if(s.won){this.hasCleared=true;if(Number.isFinite(s.time)&&(this.best===null||s.time<this.best))this.best=s.time;}}
+ observeSurvival(s){if(Number.isFinite(s.time)&&s.time>=0)this.longestSurvival=Math.max(this.longestSurvival,s.time);if(s.won){this.hasCleared=true;if(Number.isFinite(s.distance)&&(this.bestDistance===null||s.distance<this.bestDistance))this.bestDistance=s.distance;if(Number.isFinite(s.time)&&(this.best===null||s.time<this.best))this.best=s.time;}}
  record(s){this.observeSurvival(s);this.buffer=[];this.episodes++;this.results.push(s.won?1:0);if(this.results.length>100)this.results.shift();this.distances.push(s.distance);if(this.distances.length>100)this.distances.shift();if(this.episodes%20===0){this.history.push(this.results.reduce((a,b)=>a+b,0)/this.results.length);if(this.history.length>40)this.history.shift();}}
- episode(map,config,epsilon=.2,range=4){this.buffer=[];const env=new VisionEnvironment(map,config,range);let o=env.observe();while(!env.state.done){const a=this.choose(o,epsilon),r=env.step(a);this.learn(o,a,r.observation,r.reward,r.done);o=r.observation;}this.record(env.state);return env.state;}
- serialize(){return {memoryLimit:this.memoryLimit,outcomeLimit:this.outcomeLimit,q:this.q,episodes:this.episodes,results:this.results,best:this.best,history:this.history,distances:this.distances,longestSurvival:this.longestSurvival,hasCleared:this.hasCleared,experience:this.experience,outcomes:this.outcomes,transitions:this.transitions,terminalTransitions:this.terminalTransitions,replays:this.replays};}
+ episode(map,config,epsilon=.2,range=4){this.buffer=[];const env=new VisionEnvironment(map,config,range);let o=env.observe();while(!env.state.done){const a=this.choose(o,epsilon),r=env.step(a);this.learn(o,a,r.observation,r.reward,r.done,this.buffer,r);o=r.observation;}this.record(env.state);return env.state;}
+ serialize(){return {memoryLimit:this.memoryLimit,outcomeLimit:this.outcomeLimit,q:this.q,episodes:this.episodes,results:this.results,best:this.best,bestDistance:this.bestDistance,history:this.history,distances:this.distances,longestSurvival:this.longestSurvival,hasCleared:this.hasCleared,experience:this.experience,outcomes:this.outcomes,transitions:this.transitions,terminalTransitions:this.terminalTransitions,replays:this.replays};}
 }
-Object.assign(E,{VISION_OFFSETS:OFFSETS,CONTROL_DT:DT,CONTROLS:controls,sense,observationKey,policyKey,rewardFor,sameDeck,VisionEnvironment,VisionLearner});
+Object.assign(E,{VISION_OFFSETS:OFFSETS,CONTROL_DT:DT,CONTROLS:controls,sense,observationKey,policyKey,distanceDiscount,rewardFor,sameDeck,VisionEnvironment,VisionLearner});
 })();
