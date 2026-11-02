@@ -28,7 +28,8 @@ function sense(map,state,range=4,vehicles=[]){
  const a=Math.atan2(map.goal[1]-state.y,map.goal[0]-state.x)-state.angle;
  return {rays,range,speed:state.speed,goalBearing:Math.atan2(Math.sin(a),Math.cos(a)),goalDistance:Math.hypot(map.goal[0]-state.x,map.goal[1]-state.y)};
 }
-function observationKey(o){const bin=v=>v<.25?0:v<.65?1:2;const base=o.rays.map(r=>bin(r.distance)).join('')+':'+Math.floor((o.goalBearing+Math.PI)/(Math.PI/4))%8+':'+(o.speed<.2?0:o.speed<.8?1:o.speed<1.6?2:o.speed<3?3:4),traffic=o.rays.reduce((mask,r,i)=>r.kind==='car'?mask|(1<<i):mask,0);return base+(traffic?':cars'+traffic:'');}
+function legacyObservationKey(o){const bin=v=>v<.25?0:v<.65?1:2;const base=o.rays.map(r=>bin(r.distance)).join('')+':'+Math.floor((o.goalBearing+Math.PI)/(Math.PI/4))%8+':'+(o.speed<.2?0:o.speed<.8?1:o.speed<1.6?2:o.speed<3?3:4),traffic=o.rays.reduce((mask,r,i)=>r.kind==='car'?mask|(1<<i):mask,0);return base+(traffic?':cars'+traffic:'');}
+function observationKey(o){const bin=v=>v<.16?0:v<.28?1:v<.42?2:v<.65?3:v<1?4:v<1.6?5:v<2.6?6:7,traffic=o.rays.reduce((mask,r,i)=>r.kind==='car'?mask|(1<<i):mask,0);return 'm4:'+o.rays.map(r=>bin(r.distance)).join('')+':'+Math.floor((o.goalBearing+Math.PI)/(Math.PI/8))%16+':'+(o.speed<.2?0:o.speed<.8?1:o.speed<1.6?2:o.speed<3?3:4)+(traffic?':cars'+traffic:'');}
 function rewardFor(map,before,after,visited){
  after.idleTime=after.speed<.18?(before.idleTime||0)+(after.time-before.time):0;
  if(!after.done&&after.idleTime>=2){after.done=true;after.reason='停车过久，重新尝试';}
@@ -45,20 +46,32 @@ class VisionEnvironment{
  step(action){const before=this.state;let s=before;for(let i=0;i<8&&!s.done;i++)s=E.advanceManual(this.map,s,controls[action],1/120,this.config);this.state=s;const reward=rewardFor(this.map,before,s,this.visited);return {observation:this.observe(),reward,done:s.done};}
 }
 class VisionLearner{
- constructor(data){this.q=data?.q||{};this.episodes=data?.episodes||0;this.results=data?.results||[];this.best=data?.best??null;this.history=data?.history||[];this.distances=data?.distances||[];this.longestSurvival=Number.isFinite(data?.longestSurvival)?Math.max(0,data.longestSurvival):0;this.hasCleared=!!data?.hasCleared||this.best!==null||this.results.includes(1);this.buffer=[];this.lastReward=0;}
- values(observation){const k=observationKey(observation);return this.q[k]||(this.q[k]=[.02,0,0,0,0]);}
- choose(observation,epsilon=0){if(Math.random()<epsilon)return ACTIONS[Math.floor(Math.random()*ACTIONS.length)];const q=this.values(observation),m=Math.max(...q),choices=q.map((v,i)=>v===m?i:-1).filter(i=>i>=0);return ACTIONS[choices[Math.floor(Math.random()*choices.length)]];}
+ constructor(data){this.q=data?.q||{};this.episodes=data?.episodes||0;this.results=data?.results||[];this.best=data?.best??null;this.history=data?.history||[];this.distances=data?.distances||[];this.longestSurvival=Number.isFinite(data?.longestSurvival)?Math.max(0,data.longestSurvival):0;this.hasCleared=!!data?.hasCleared||this.best!==null||this.results.includes(1);this.buffer=[];this.lastReward=0;this.experience=(data?.experience||[]).slice(-4096);this.outcomes=(data?.outcomes||[]).slice(-512);this.transitions=Math.max(data?.transitions||0,this.experience.length);this.terminalTransitions=Math.max(data?.terminalTransitions||0,this.outcomes.length);this.replays=data?.replays||0;}
+ values(observation){const k=observationKey(observation);return this.q[k]||(this.q[k]=[...(this.q[legacyObservationKey(observation)]||[.02,0,0,0,0])]);}
+ choose(observation,epsilon=0){this.lastChoiceExploratory=epsilon>0&&Math.random()<epsilon;if(this.lastChoiceExploratory)return ACTIONS[Math.floor(Math.random()*ACTIONS.length)];const q=this.values(observation),m=Math.max(...q),choices=q.map((v,i)=>v===m?i:-1).filter(i=>i>=0);return ACTIONS[choices[Math.floor(Math.random()*choices.length)]];}
  learn(o,a,next,reward,done,stream=this.buffer){
-  this.lastReward=reward;const key=observationKey(o),nextKey=observationKey(next),index=ACTIONS.indexOf(a);this.values(o);this.values(next);stream.push({key,index,nextKey,reward,done});if(stream.length>12)stream.shift();
-  // Standard off-policy Q-learning, replaying recent real transitions backwards:
-  // Q(s,a) += alpha * (r + gamma * max_a Q(s',a) - Q(s,a)).
-  for(let i=stream.length-1;i>=0;i--){const t=stream[i],row=this.q[t.key],target=t.reward+(t.done?0:.98*Math.max(...this.q[t.nextKey]));row[t.index]+=.18*(target-row[t.index]);}
+  this.lastReward=reward;const key=observationKey(o),nextKey=observationKey(next),index=ACTIONS.indexOf(a),row=this.values(o),nextRow=this.values(next);
+  // Watkins Q(lambda): an exploratory, non-greedy action breaks earlier credit.
+  // Its later failure must not blame the safe choices before that deviation.
+  if(row[index]<Math.max(...row)-1e-10)stream.length=0;
+  const duplicate=stream.findIndex(t=>t.key===key&&t.index===index);if(duplicate>=0)stream.splice(duplicate,1);
+  stream.push({key,index});if(stream.length>96)stream.shift();
+  const delta=reward+(done?0:.98*Math.max(...nextRow))-row[index];let eligibility=1;
+  for(let i=stream.length-1;i>=0&&eligibility>.001;i--){const t=stream[i];this.q[t.key][t.index]+=.18*delta*eligibility;eligibility*=.98*.85;}
   if(done)stream.length=0;
+  // Replay earlier episodes as well as the current one. Each car's eligibility
+  // trace stays private; only real transitions enter the shared durable memory.
+  const replay=t=>{if(!t)return;const r=this.q[t.key],n=this.q[t.nextKey];if(!r||!n)return;r[t.index]+=.06*(t.reward+(t.done?0:.98*Math.max(...n))-r[t.index]);this.replays++;};
+  for(let i=0;i<2&&this.experience.length;i++)replay(this.experience[Math.floor(Math.random()*this.experience.length)]);
+  if(this.transitions%4===0&&this.outcomes.length)replay(this.outcomes[Math.floor(Math.random()*this.outcomes.length)]);
+  const transition={key,index,nextKey,reward,done};this.transitions++;
+  if(this.experience.length<4096)this.experience.push(transition);else{const slot=Math.floor(Math.random()*this.transitions);if(slot<4096)this.experience[slot]=transition;}
+  if(done){this.terminalTransitions++;if(this.outcomes.length<512)this.outcomes.push(transition);else{const slot=Math.floor(Math.random()*this.terminalTransitions);if(slot<512)this.outcomes[slot]=transition;}}
  }
  observeSurvival(s){if(Number.isFinite(s.time)&&s.time>=0)this.longestSurvival=Math.max(this.longestSurvival,s.time);if(s.won){this.hasCleared=true;if(Number.isFinite(s.time)&&(this.best===null||s.time<this.best))this.best=s.time;}}
  record(s){this.observeSurvival(s);this.buffer=[];this.episodes++;this.results.push(s.won?1:0);if(this.results.length>100)this.results.shift();this.distances.push(s.distance);if(this.distances.length>100)this.distances.shift();if(this.episodes%20===0){this.history.push(this.results.reduce((a,b)=>a+b,0)/this.results.length);if(this.history.length>40)this.history.shift();}}
  episode(map,config,epsilon=.2,range=4){this.buffer=[];const env=new VisionEnvironment(map,config,range);let o=env.observe();while(!env.state.done){const a=this.choose(o,epsilon),r=env.step(a);this.learn(o,a,r.observation,r.reward,r.done);o=r.observation;}this.record(env.state);return env.state;}
- serialize(){return {q:this.q,episodes:this.episodes,results:this.results,best:this.best,history:this.history,distances:this.distances,longestSurvival:this.longestSurvival,hasCleared:this.hasCleared};}
+ serialize(){return {q:this.q,episodes:this.episodes,results:this.results,best:this.best,history:this.history,distances:this.distances,longestSurvival:this.longestSurvival,hasCleared:this.hasCleared,experience:this.experience,outcomes:this.outcomes,transitions:this.transitions,terminalTransitions:this.terminalTransitions,replays:this.replays};}
 }
 Object.assign(E,{VISION_OFFSETS:OFFSETS,CONTROL_DT:DT,CONTROLS:controls,sense,observationKey,rewardFor,sameDeck,VisionEnvironment,VisionLearner});
 })();

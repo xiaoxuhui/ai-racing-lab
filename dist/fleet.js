@@ -26,7 +26,7 @@ class FleetWorld{
   // Observe and choose before moving any car, so each sees the same instant.
   for(const car of active){
    if(car.id===manualId){car.decision=null;car.buffer=[];continue;}
-   if(!car.decision){const seen=E.sense(this.map,car.state,this.range,beforeStates);car.decision={before:car.state,observation:seen,action:this.learner.choose(seen,epsilon)};car.ticks=0;}
+   if(!car.decision){const seen=E.sense(this.map,car.state,this.range,beforeStates);car.decision={before:car.state,observation:seen,action:this.learner.choose(seen,epsilon)};car.lastExploratory=!!this.learner.lastChoiceExploratory;car.ticks=0;}
   }
   for(const car of active){const chosen=car.id===manualId?control:E.CONTROLS[car.decision.action];car.state=E.advanceManual(this.map,car.state,chosen,dt,this.config);car.ticks++;}
   // No vehicle-to-vehicle contact test: overlapping cars remain independent.

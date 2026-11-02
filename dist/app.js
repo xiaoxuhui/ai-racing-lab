@@ -6,6 +6,7 @@ let config={color:'#d5ed99',style:'sport',maxSpeed:8,acceleration:2,steering:3,.
 let mapIndex=0,map,learner,state,mode='ai',running=false,training=false,editing=false,tool='road',draft=null,undo=[],editOrigin=0,paintPointer=null,lastCell=null,paintChanged=false,strokePainted=new Set();
 let routeVisible=false,trail=[],last=0,accumulator=0,toastTimer,storageAvailable=true,held=new Set(),pointers=new Map(),keys=new Set(),renderClock=0;
 let observation=null,showVision=true,visionRange=4;
+let liveExplore=!!load('apex-live-explore-v1',false);
 let trainingTask=null,progressHideTimer=null;
 const latched=new Set(),pointerPresses=new Map();
 let angleBeforeDrag=null;
@@ -128,12 +129,14 @@ function drawVision(){
 const actionNames={straight:['直行','→'],accelerate:['持续加速','↑'],decelerate:['持续减速','↓'],left:['持续左转','↰'],right:['持续右转','↱']};
 function update(){
  updateSurvival();
+ $('memoryStatus').textContent=`已记忆 ${learner.experience.length.toLocaleString()} 条经历 · ${learner.outcomes.length.toLocaleString()} 条结局 · 累计回放 ${learner.replays.toLocaleString()} 次`;
+ $('decisionStatus').textContent=mode==='manual'?'所选赛车由你控制，其余车辆保留学习记忆':fleet?.cars[selectedCar]?.lastExploratory?'本次动作：随机探索':'本次动作：按累计 Q 值选择';
  const active=fleet?.cars.filter(c=>c.active).length||0,waiting=fleet?.cars.filter(c=>c.waiting).length||0;$('fleetStatus').textContent=`在场 ${active} · 等候 ${waiting} · 死亡 ${fleet?.deaths||0}`;$('agentBadge').textContent='CAR '+String(selectedCar+1).padStart(2,'0');$('fleetCount').disabled=training||editing;$('observedCar').disabled=editing||!fleet;$('clearTraces').disabled=training||editing||!fleet;updateCarRecords();
  if(fleet)for(const c of fleet.cars){const option=$('observedCar').options[c.id],text=String(c.id+1).padStart(2,'0')+' 号 · '+(c.active?'行驶':c.waiting?'待发':c.state.won?'已通关':'已结束');if(option&&option.textContent!==text)option.textContent=text;}
  $('aiMode').classList.toggle('active',mode==='ai');$('manualMode').classList.toggle('active',mode==='manual');$('aiMode').setAttribute('aria-pressed',mode==='ai');$('manualMode').setAttribute('aria-pressed',mode==='manual');
  const issue=E.drivingIssue(map),warning=E.mapIssue(map);$('trackNotice').classList.toggle('hidden',editing||!warning);$('trackIssue').textContent=warning+(!issue?'；仍可尝试驾驶和训练':'');
  $('start').disabled=training||editing||!!issue;$('train').disabled=editing||!!issue||!!trainingTask?.stop;$('retrain').disabled=editing||!!issue;$('releaseControls').disabled=training||editing||!!issue;$('routeToggle').disabled=editing||!!warning;document.querySelectorAll('[data-action]').forEach(b=>b.disabled=training||editing||!!issue);
- $('train').innerHTML=training?(trainingTask?.stop?'正在停止…':'Ⅱ 停止训练'):(learner.episodes?'✧ 继续训练 5,000 轮 <span>→</span>':'✧ 开始训练 5,000 轮 <span>→</span>');$('retrain').textContent=training?'↺ 停止并从零训练':'↺ 从零重新训练';$('trainingHint').textContent=issue?'无法开始：'+issue:'继续训练保留经验；从零重新训练会清空本赛道的 Q 表并立即训练。';
+ $('train').innerHTML=training?(trainingTask?.stop?'正在停止…':'Ⅱ 停止训练'):(learner.episodes?'✧ 继续训练 5,000 轮 <span>→</span>':'✧ 开始训练 5,000 轮 <span>→</span>');$('retrain').textContent=training?'↺ 停止并从零训练':'↺ 从零重新训练';$('trainingHint').textContent=issue?'无法开始：'+issue:'继续训练保留 Q 表和跨轮记忆；从零重新训练会清空两者并立即训练。';
  if(!state){$('speed').innerHTML='— <small>格 / 秒</small>';$('elapsed').textContent='00:00.0';$('steps').innerHTML='0.00 <small>格</small>';$('action').textContent='等待设置';$('runStatus').textContent=editing?'正在编辑赛道':issue;$('coordinates').textContent='地图草稿 · '+map.width+' × '+map.height;$('start').textContent='请先补齐赛道';return;}$('speed').innerHTML=state.speed.toFixed(2)+' <small>格 / 秒</small>';
  const sec=state.time;$('elapsed').innerHTML=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(Math.floor(sec%60)).padStart(2,'0')+'<small>.'+Math.floor((sec%1)*10)+'</small>';
  $('steps').innerHTML=state.distance.toFixed(2)+' <small>格</small>';
@@ -161,7 +164,7 @@ function handleFleetEvents(persistRecords=true){
 let lastFleetSave=0;
 function advance(dt){
  if(!fleet)return;fleet.range=visionRange;
- fleet.step(dt,{manualId:mode==='manual'?selectedCar:-1,control:{throttle:held.has('accelerate')?1:0,brake:held.has('decelerate')?1:0,steer:(held.has('right')?1:0)-(held.has('left')?1:0)},epsilon:.02,repeat:$('autoRepeat').checked});syncSelected();
+ fleet.step(dt,{manualId:mode==='manual'?selectedCar:-1,control:{throttle:held.has('accelerate')?1:0,brake:held.has('decelerate')?1:0,steer:(held.has('right')?1:0)-(held.has('left')?1:0)},epsilon:liveExplore?Number($('exploration').value)/100:0,repeat:$('autoRepeat').checked});syncSelected();
 }
 function frame(now){
  const elapsed=last?Math.min((now-last)/1000,1):0;last=now;
@@ -262,6 +265,7 @@ $('autoConnect').checked=!!load('apex-road-autoconnect-v1',false);$('autoConnect
 $('visionToggle').onchange=e=>{showVision=e.target.checked;drawVision();};
 $('visionRange').oninput=e=>{visionRange=Number(e.target.value);$('visionRangeValue').textContent=visionRange;if(fleet){fleet.range=visionRange;for(const car of fleet.cars){car.decision=null;car.buffer=[];}}drawVision();};
 $('fleetCount').onchange=e=>{if(training||editing)return;save();fleetCount=Number(e.target.value);persist('apex-fleet-count-v1',fleetCount);reset();stats();e.target.blur();toast(`已切换为 ${fleetCount} 辆赛车，学习经验保留。`);};$('observedCar').onchange=e=>{selectCar(Number(e.target.value));e.target.blur();};
+$('liveExplore').checked=liveExplore;$('liveExplore').onchange=e=>{liveExplore=e.target.checked;persist('apex-live-explore-v1',liveExplore);update();};
 $('showTrails').checked=showTrails;$('showTrails').onchange=e=>{showTrails=e.target.checked;persist('apex-show-trails-v1',showTrails);drawDynamic();};$('showDeaths').checked=showDeaths;$('showDeaths').onchange=e=>{showDeaths=e.target.checked;persist('apex-show-deaths-v1',showDeaths);drawDynamic();};$('clearTraces').onclick=()=>{if(!fleet||training||editing)return;fleet.clearHistory();drawDynamic();update();toast('已清除画面轨迹和死亡标记，学习经验保留。');};
 window.addEventListener('beforeunload',save);const selectedMap=load('apex-selected-map-v1',0);init(Number.isInteger(selectedMap)&&selectedMap>=0&&selectedMap<=3?selectedMap:0);requestAnimationFrame(frame);
 })();

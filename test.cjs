@@ -172,6 +172,34 @@ terminal.q[E.observationKey(next)] = [100, 100, 100, 100, 100];
 terminal.learn(seen, 'left', next, -15, true);
 assert(Math.abs(terminal.values(seen)[3] - -.18 * 15) < 1e-10, 'Terminal transitions must not bootstrap');
 assert(!('map' in q), 'The policy must not own a map');
+// Distinct stopping distances must no longer collapse into the same state.
+const nearView={...seen,rays:seen.rays.map((r,i)=>i===3?{...r,distance:.7}:r)};
+assert.notEqual(E.observationKey(nearView),E.observationKey(seen),'0.7 units and an open straight are different driving situations');
+// A non-greedy deviation must not propagate its terminal penalty into the
+// preceding successful prefix. A subsequent greedy choice must avoid it.
+const credit=new E.VisionLearner(),creditStream=[];
+credit.values(seen)[0]=5;credit.values(next)[0]=2;
+credit.learn(seen,'straight',next,.1,false,creditStream);
+credit.learn(next,'left',next,-15,true,creditStream);
+assert(credit.values(seen)[0]>0,'An exploratory death must retain the useful earlier action');
+assert(credit.values(next)[3]<0,'The failing exploratory action itself must receive the penalty');
+for(let i=0;i<50;i++)assert.notEqual(credit.choose(next,0),'left','Greedy driving must not repeat a known lower-value fatal action');
+assert.equal(creditStream.length,0);
+// Experience survives episode boundaries, reset, and JSON round trips, and is
+// actually replayed rather than being a display-only counter.
+const longMemory=new E.VisionLearner();
+longMemory.learn(seen,'left',next,-15,true);longMemory.record({time:1,won:false,distance:.5});
+const remembered=new E.VisionLearner(JSON.parse(JSON.stringify(longMemory.serialize())));
+assert.equal(remembered.experience.length,1);assert.equal(remembered.outcomes.length,1);
+remembered.values(seen)[3]=20;
+remembered.learn(next,'straight',next,.1,false);
+assert(remembered.values(seen)[3]<20,'A stored earlier-episode failure must be relearned on a later episode');
+assert(remembered.replays>=2);
+const oldQ=new E.VisionLearner({q:{'1222221:4:2':[7,2,1,0,-1]}});
+assert(oldQ.q['1222221:4:2'],'Legacy Q records must remain present rather than being erased');
+const migrated=new E.VisionLearner({q:{'1111111:4:2':[7,2,1,0,-1]}});
+const legacyView={...seen,goalBearing:0,speed:1,rays:seen.rays.map(r=>({...r,distance:.4,kind:'edge'}))};
+assert.deepEqual(migrated.values(legacyView),[7,2,1,0,-1],'New detailed states inherit the prior coarse Q experience');
 const environment = new E.VisionEnvironment(map, config);
 let physical = E.continuousInitial(map);
 for (let i = 0; i < 8; i++) physical = E.advanceManual(map, physical, E.CONTROLS.accelerate, 1 / 120, config);
@@ -199,6 +227,24 @@ assert(evaluation.state.distance > randomDistance / 30 * 3, 'Learning must impro
 assert.equal(learner.episodes, 5000);
 const restored = new E.VisionLearner(JSON.parse(JSON.stringify(learner.serialize())));
 assert.deepEqual(restored.values(seen), learner.values(seen));
+assert.equal(restored.experience.length,4096,'Across-episode replay must remain bounded');
+assert.equal(restored.outcomes.length,512,'Terminal experience must be retained separately within its bound');
+assert.equal(restored.transitions,learner.transitions);
+assert.equal(restored.replays,learner.replays);
+// End-to-end regression: one exploratory road exit must not erase a learned
+// straight-track solution, including after saving and restoring the learner.
+const previousRandom=Math.random;let straightSeed=543;
+Math.random=()=>((straightSeed=(Math.imul(straightSeed,1664525)+1013904223)>>>0)/4294967296);
+const straightMap=E.makeMap(3,{width:10,height:7,roads:Array.from({length:8},(_,i)=>`${i+1},3`),bridges:[],start:[1,3],goal:[8,3],startDir:0});
+const straightLearner=new E.VisionLearner();
+for(let i=0;i<600;i++)straightLearner.episode(straightMap,config,.12);
+function verifyStraight(policy){for(let i=0;i<10;i++){const env=new E.VisionEnvironment(straightMap,config);while(!env.state.done)env.step(policy.choose(env.observe(),0));assert(env.state.won,'A learned straight-track solution must survive an isolated exploratory death');}}
+verifyStraight(straightLearner);
+const exploratoryRun=new E.VisionEnvironment(straightMap,config);let exploratoryView=exploratoryRun.observe();
+while(!exploratoryRun.state.done){const a=exploratoryRun.state.time<1?'straight':'left',r=exploratoryRun.step(a);straightLearner.learn(exploratoryView,a,r.observation,r.reward,r.done);exploratoryView=r.observation;}
+assert.equal(exploratoryRun.state.won,false);assert.equal(exploratoryRun.state.reason,'驶出道路');
+verifyStraight(new E.VisionLearner(JSON.parse(JSON.stringify(straightLearner.serialize()))));
+Math.random=previousRandom;
 const app = fs.readFileSync('./dist/app.js', 'utf8');
 assert(!app.includes('E.plan(') && !app.includes('E.samplePath('), 'Visible AI must not follow a scripted trajectory');
 console.log('Seven-ray vision, bridge layers, erasure, Bellman updates, continuous physics and persistence: passed');
