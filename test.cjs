@@ -105,6 +105,8 @@ assert.equal(traffic.rays[3].kind,'car');
 assert.equal(traffic.rays[3].vehicleId,1);
 assert(Math.abs(traffic.rays[3].distance-.74)<1e-10,'Front ray must stop at the other vehicle body');
 assert.notEqual(E.observationKey(traffic),E.observationKey(E.sense(map,observer)),'Traffic must influence the policy state');
+assert.equal(E.policyKey(traffic),E.policyKey(E.sense(map,observer)),'Visible ghost cars must not hide the road geometry used to drive the champion policy');
+assert.equal(traffic.rays[3].roadDistance,4,'Keep a separate road scan while still visibly detecting the front car');
 const yielding={...observer,speed:0,time:2.1};E.rewardFor(map,{...observer,speed:0,time:0},yielding,new Set(),traffic);assert(yielding.done,'Non-blocking vehicles must not create a reward exemption for indefinite parking');
 assert.equal(E.sense(map,observer,4,[observer]).rays[3].kind,'clear','A car must not see itself');
 const underpass={...initial,x:6,y:5,angle:Math.PI/2,carId:2,bridgeLock:{x:6,y:5,axis:'v'}},overpass={...initial,x:6,y:5,carId:3,bridgeLock:{x:6,y:5,axis:'h'}};
@@ -271,6 +273,33 @@ const exploratoryRun=new E.VisionEnvironment(straightMap,config);let exploratory
 while(!exploratoryRun.state.done){const a=exploratoryRun.state.time<1?'straight':'left',r=exploratoryRun.step(a);straightLearner.learn(exploratoryView,a,r.observation,r.reward,r.done);exploratoryView=r.observation;}
 assert.equal(exploratoryRun.state.won,false);assert.equal(exploratoryRun.state.reason,'驶出道路');
 verifyStraight(new E.VisionLearner(JSON.parse(JSON.stringify(straightLearner.serialize()))));
+// Elite selection must transfer an actually better policy rather than an
+// average, the latest failed driver, or the largest training count.
+const eliteGroup=new E.FleetLearner();
+function badDriver(){const p=new E.VisionLearner({memoryLimit:512,outcomeLimit:64});p.values(E.sense(straightMap,E.continuousInitial(straightMap)))[3]=30;return p;}
+for(let id=0;id<4;id++)eliteGroup.drivers.set(id,badDriver());
+eliteGroup.drivers.set(1,new E.VisionLearner(JSON.parse(JSON.stringify(straightLearner.serialize()))));
+eliteGroup.forCar(0).episodes=1234;
+assert(eliteGroup.selectChampion(straightMap,config,4,true));
+assert.equal(eliteGroup.champion.id,1,'A proven successful driver must beat failed drivers even when they have more attempts');
+assert(eliteGroup.champion.won);
+const eliteSnapshot=JSON.stringify(eliteGroup.champion),explorerBefore=eliteGroup.forCar(3);
+const follower=eliteGroup.inheritChampion(0,straightMap,config);
+assert.equal(follower.episodes,1234,'Learning from the champion must retain the follower’s own attempt statistics');
+assert(E.evaluatePolicy(follower.serialize(),straightMap,config).won,'A follower must inherit the successful policy, not an averaged policy');
+assert.notEqual(follower.q,eliteGroup.forCar(1).q,'Followers must have their own mutable policy after learning');
+assert.equal(eliteGroup.inheritChampion(3,straightMap,config),explorerBefore,'Keep an independent explorer instead of cloning every car');
+assert.equal(eliteGroup.sources[0].id,1);
+for(let id=0;id<4;id++)eliteGroup.drivers.set(id,badDriver());
+assert.equal(eliteGroup.selectChampion(straightMap,config,4,true),false,'A bad later generation must not replace a saved better champion');
+assert.equal(JSON.stringify(eliteGroup.champion),eliteSnapshot,'The elite checkpoint must remain independent of subsequent failures');
+const eliteReload=new E.FleetLearner(JSON.parse(JSON.stringify(eliteGroup.serialize())));
+assert.equal(eliteReload.champion.id,1);assert(eliteReload.champion.won);assert.equal(eliteReload.sources[0].id,1);
+assert(E.evaluatePolicy(eliteReload.champion.model,straightMap,config).won,'The saved champion must work after reload');
+const eliteDemo=new E.FleetWorld(straightMap,eliteReload,config,4);
+for(let i=0;i<1800&&!eliteDemo.cars[1].state.done;i++)eliteDemo.step(1/120,{epsilon:1,repeat:false});
+assert(eliteDemo.cars[1].state.won,'The champion source car must reproduce the saved solution in a visible fleet even while other cars explore');
+assert.equal(eliteDemo.cars[1].lastExploratory,false,'The elite demonstration must not randomly discard its saved strategy');
 Math.random=previousRandom;
 const app = fs.readFileSync('./dist/app.js', 'utf8');
 assert(!app.includes('E.plan(') && !app.includes('E.samplePath('), 'Visible AI must not follow a scripted trajectory');

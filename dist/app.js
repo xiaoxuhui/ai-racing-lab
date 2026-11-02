@@ -123,13 +123,14 @@ function drawVision(){
  const names=['左后','左侧','左前','正前','右前','右侧','右后'];
  o.rays.forEach((r,i)=>{const el=document.createElement('div');el.className='sensor-reading';el.dataset.hitKind=r.kind;const title=document.createElement('span');title.textContent=names[i];const meter=document.createElement('i');meter.style.setProperty('--distance',Math.max(2,r.distance/visionRange*100)+'%');meter.style.setProperty('--ray',r.kind==='car'?'#75abc4':r.distance<.3?'#d98b71':r.distance<.7?'#c3aa6e':'#92b96b');const value=document.createElement('b');value.textContent=r.distance.toFixed(2);el.append(title,meter,value);readings.append(el);});
  $('goalBearing').textContent=(o.goalBearing*180/Math.PI).toFixed(0)+'°';$('visionState').textContent=E.observationKey(o);
- const qs=observedLearner().q[E.observationKey(o)]||[0,0,0,0,0],best=Math.max(...qs),scale=Math.max(1,...qs.map(Math.abs));
+ const qs=observedLearner().values(o),best=Math.max(...qs),scale=Math.max(1,...qs.map(Math.abs));
  $('qValues').replaceChildren();E.ACTIONS.forEach((a,i)=>{const el=document.createElement('div');el.className='q-row'+(qs[i]===best?' best':'');const name=document.createElement('span');name.textContent={straight:'直行',accelerate:'加速',decelerate:'减速',left:'左转',right:'右转'}[a];const bar=document.createElement('i');bar.style.width=(8+Math.abs(qs[i])/scale*52)+'%';const value=document.createElement('b');value.textContent=qs[i].toFixed(2);el.append(name,bar,value);$('qValues').append(el);});
  $('rewardValue').textContent=(fleet?.cars[selectedCar]?.lastReward??learner.lastReward).toFixed(2);$('knownStates').textContent=Object.keys(observedLearner().q).length.toLocaleString();
 }
 const actionNames={straight:['直行','→'],accelerate:['持续加速','↑'],decelerate:['持续减速','↓'],left:['持续左转','↰'],right:['持续右转','↱']};
 function update(){
  updateSurvival();
+ const champion=learner.champion;$('championStatus').textContent=champion?`${String(champion.id+1).padStart(2,'0')} 号冠军 · 第 ${champion.generation} 代`:'等待选出冠军';$('championScore').textContent=champion?(champion.won?`同场复测已通关 · ${champion.time.toFixed(1)} 秒`:`同场复测尚未通关 · 探索 ${champion.coverage} 个位置 · 行驶 ${champion.distance.toFixed(1)} 格`):'自动比较策略；通关优先，保留更好的冠军快照。';$('learningSource').textContent=`所选赛车：${learner.role(selectedCar)}`+(champion?.id===selectedCar?' · 下次出发演示冠军快照':selectedCar%4===3?' · 保持独立探索':' · 下次出发仅向更好的冠军学习');$('selectChampion').disabled=training||editing||!fleet;$('watchChampion').disabled=editing||!champion||!fleet?.cars[champion?.id];
  $('policyStatus').textContent=observedLearner().episodes?'本车已学 '+observedLearner().episodes.toLocaleString()+' 轮':'本车尚未训练';
  $('memoryStatus').textContent=`${String(selectedCar+1).padStart(2,'0')} 号独立记忆 · 已记忆 ${observedLearner().experience.length.toLocaleString()} 条经历 · ${observedLearner().outcomes.length.toLocaleString()} 条结局 · 累计回放 ${observedLearner().replays.toLocaleString()} 次`;
  $('decisionStatus').textContent=mode==='manual'?'所选赛车由你控制，其余车辆保留学习记忆':fleet?.cars[selectedCar]?.lastExploratory?'本次动作：随机探索':'本次动作：按累计 Q 值选择';
@@ -147,7 +148,7 @@ function update(){
  $('runStatus').textContent=editing?'正在编辑赛道':training?'车队正在加速训练':fleet?.cars[selectedCar].waiting?'所选赛车排队出发':state.done?state.reason:running?'车队连续行驶中':state.time?'已暂停':'等待车队出发';
  $('coordinates').textContent=`位置 (${state.x.toFixed(2)}, ${state.y.toFixed(2)}) · 朝向 ${((state.angle*180/Math.PI%360+360)%360).toFixed(0)}°`;
  $('modeTitle').textContent=mode==='ai'?'训练你的赛车':'接管方向盘';
- $('modeDesc').textContent=mode==='ai'?`${fleetCount} 辆车在同一赛道同时学习，各自保存 Q 表和记忆。蓝色射线表示探测到其他车辆。`:`你正在接管 ${String(selectedCar+1).padStart(2,'0')} 号车，其余赛车继续自动学习。轻点保持动作，再点松开。`;
+ $('modeDesc').textContent=mode==='ai'?`${fleetCount} 辆车在同一赛道同时学习，选优后学习更好的冠军，保留部分赛车独立探索。蓝色射线表示其他车辆。`:`你正在接管 ${String(selectedCar+1).padStart(2,'0')} 号车，其余赛车继续自动学习。轻点保持动作，再点松开。`;
  $('actionHint').textContent=held.size?'持续执行：'+[...held].map(a=>actionNames[a][0]).join(' + ')+(latched.size?' · 再点同一按钮或「松开全部」停止施加动作':''):'轻点保持动作，再点松开；长按与键盘松手后保持当前车速和方向。';
 }
 function stats(){
@@ -267,6 +268,7 @@ $('autoConnect').checked=!!load('apex-road-autoconnect-v1',false);$('autoConnect
 $('visionToggle').onchange=e=>{showVision=e.target.checked;drawVision();};
 $('visionRange').oninput=e=>{visionRange=Number(e.target.value);$('visionRangeValue').textContent=visionRange;if(fleet){fleet.range=visionRange;for(const car of fleet.cars){car.decision=null;car.buffer=[];}}drawVision();};
 $('fleetCount').onchange=e=>{if(training||editing)return;save();fleetCount=Number(e.target.value);persist('apex-fleet-count-v1',fleetCount);reset();stats();e.target.blur();toast(`已切换为 ${fleetCount} 辆赛车，学习经验保留。`);};$('observedCar').onchange=e=>{selectCar(Number(e.target.value));e.target.blur();};
+$('selectChampion').onclick=()=>{if(training||editing||!fleet)return;running=false;clearHeld();const changed=learner.selectChampion(map,config,visionRange,true);save();update();drawDynamic();toast(changed?'已选出更好的冠军；其他车在下次出发时学习。':'已完成比较，保留现有冠军。');};$('watchChampion').onclick=()=>{if(learner.champion&&fleet?.cars[learner.champion.id])selectCar(learner.champion.id);};
 $('liveExplore').checked=liveExplore;$('liveExplore').onchange=e=>{liveExplore=e.target.checked;persist('apex-live-explore-v1',liveExplore);update();};
 $('showTrails').checked=showTrails;$('showTrails').onchange=e=>{showTrails=e.target.checked;persist('apex-show-trails-v1',showTrails);drawDynamic();};$('showDeaths').checked=showDeaths;$('showDeaths').onchange=e=>{showDeaths=e.target.checked;persist('apex-show-deaths-v1',showDeaths);drawDynamic();};$('clearTraces').onclick=()=>{if(!fleet||training||editing)return;fleet.clearHistory();drawDynamic();update();toast('已清除画面轨迹和死亡标记，学习经验保留。');};
 window.addEventListener('beforeunload',()=>{if(learner)save();});
