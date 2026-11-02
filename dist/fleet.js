@@ -5,7 +5,7 @@ const E=globalThis.Racing;
 class FleetWorld{
  constructor(map,learner,config,count=8,range=4){
   this.map=map;this.learner=learner;this.config=config;this.range=range;this.time=0;this.nextSpawn=0;this.events=[];this.deaths=0;this.historyVersion=0;
-  this.cars=Array.from({length:E.clamp(Math.trunc(Number(count)||8),1,16)},(_,id)=>({id,state:{...E.continuousInitial(map),carId:id},active:false,waiting:true,finished:false,readyAt:id*.25,decision:null,ticks:0,visited:new Set(),buffer:[],trail:[],trailVersion:0,lastDeath:null,lastReward:0,attempts:0}));
+  this.cars=Array.from({length:E.clamp(Math.trunc(Number(count)||8),1,16)},(_,id)=>({id,learner:learner.forCar?learner.forCar(id):learner,state:{...E.continuousInitial(map),carId:id},active:false,waiting:true,finished:false,readyAt:id*.25,decision:null,ticks:0,visited:new Set(),buffer:[],trail:[],trailVersion:0,lastDeath:null,lastReward:0,attempts:0}));
   this.spawn(this.cars[0]);
  }
  states(){return this.cars.filter(c=>c.active&&!c.state.done).map(c=>c.state);}
@@ -26,7 +26,7 @@ class FleetWorld{
   // Observe and choose before moving any car, so each sees the same instant.
   for(const car of active){
    if(car.id===manualId){car.decision=null;car.buffer=[];continue;}
-   if(!car.decision){const seen=E.sense(this.map,car.state,this.range,beforeStates);car.decision={before:car.state,observation:seen,action:this.learner.choose(seen,epsilon)};car.lastExploratory=!!this.learner.lastChoiceExploratory;car.ticks=0;}
+   if(!car.decision){const seen=E.sense(this.map,car.state,this.range,beforeStates);car.decision={before:car.state,observation:seen,action:car.learner.choose(seen,epsilon)};car.lastExploratory=!!car.learner.lastChoiceExploratory;car.ticks=0;}
   }
   for(const car of active){const chosen=car.id===manualId?control:E.CONTROLS[car.decision.action];car.state=E.advanceManual(this.map,car.state,chosen,dt,this.config);car.ticks++;}
   // No vehicle-to-vehicle contact test: overlapping cars remain independent.
@@ -35,18 +35,33 @@ class FleetWorld{
    const manual=car.id===manualId;
    if(!manual&&(car.ticks>=8||car.state.done)){
     const decision=car.decision,seen=E.sense(this.map,car.state,this.range,afterStates),reward=E.rewardFor(this.map,decision.before,car.state,car.visited);
-    this.learner.learn(decision.observation,decision.action,seen,reward,car.state.done,car.buffer);car.lastReward=reward;car.decision=null;car.ticks=0;
+    car.learner.learn(decision.observation,decision.action,seen,reward,car.state.done,car.buffer);car.lastReward=reward;car.decision=null;car.ticks=0;
    }
-   this.learner.observeSurvival(car.state);
+   car.learner.observeSurvival(car.state);if(car.learner!==this.learner)this.learner.observeSurvival(car.state);
    const p=car.trail.at(-1),moved=p?Math.hypot(car.state.x-p[0],car.state.y-p[1]):Infinity;if(moved>.06||(car.state.done&&moved>1e-8)){car.trail.push([car.state.x,car.state.y]);if(car.trail.length>1200){const last=car.trail.length-1;car.trail=car.trail.filter((_,i)=>i%2===0||i===last);}car.trailVersion++;}
    if(car.state.done){
     car.active=false;car.finished=true;car.waiting=false;car.readyAt=this.time+.55;car.finishedAt=this.time;
     if(!car.state.won){this.deaths++;car.lastDeath={state:{...car.state},trail:car.trail.map(p=>[...p]),attempt:car.attempts,version:++this.historyVersion};}
-    if(!manual)this.learner.record(car.state);car.buffer=[];
+    if(!manual){car.learner.record(car.state);if(car.learner!==this.learner)this.learner.record(car.state);}car.buffer=[];
     this.events.push({id:car.id,state:{...car.state},manual});
    }
   }
  }
 }
-Object.assign(E,{FleetWorld});
+// The summary keeps fleet statistics only. Policies and replay memories are
+// owned by numbered drivers and never merged, averaged or copied between them.
+class FleetLearner{
+ constructor(data){
+  this.summary=new E.VisionLearner(data?.fleetVersion?data.summary:data);this.drivers=new Map();this.buffer=[];
+  if(data?.fleetVersion){for(const[id,model]of Object.entries(data.drivers||{}))this.drivers.set(Number(id),new E.VisionLearner(model));}
+  else if(data){this.drivers.set(0,new E.VisionLearner(data));}
+  this.summary.q={};this.summary.experience=[];this.summary.outcomes=[];
+ }
+ forCar(id){if(!this.drivers.has(id))this.drivers.set(id,new E.VisionLearner({memoryLimit:512,outcomeLimit:64}));return this.drivers.get(id);}
+ observeSurvival(state){this.summary.observeSurvival(state);}
+ record(state){this.summary.record(state);}
+ serialize(){return {fleetVersion:1,summary:this.summary.serialize(),drivers:Object.fromEntries([...this.drivers].map(([id,model])=>[id,model.serialize()]))};}
+}
+for(const key of ['episodes','results','best','history','distances','longestSurvival','hasCleared'])Object.defineProperty(FleetLearner.prototype,key,{get(){return this.summary[key];}});
+Object.assign(E,{FleetWorld,FleetLearner});
 })();

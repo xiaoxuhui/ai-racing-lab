@@ -1,7 +1,7 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id),E=Racing,NS='http://www.w3.org/2000/svg';
 const read=(k,fallback)=>{try{return JSON.parse(localStorage.getItem(k))??fallback;}catch{return fallback;}};
-const memory=new Map();
+const memory=new Map();let learningStorage=null;
 let config={color:'#d5ed99',style:'sport',maxSpeed:8,acceleration:2,steering:3,...read('apex-car-v2',{})};
 let mapIndex=0,map,learner,state,mode='ai',running=false,training=false,editing=false,tool='road',draft=null,undo=[],editOrigin=0,paintPointer=null,lastCell=null,paintChanged=false,strokePainted=new Set();
 let routeVisible=false,trail=[],last=0,accumulator=0,toastTimer,storageAvailable=true,held=new Set(),pointers=new Map(),keys=new Set(),renderClock=0;
@@ -15,13 +15,14 @@ if(![1,4,8,12,16].includes(fleetCount))fleetCount=8;
 const fleetColors=['#edb374','#8fbdd5','#c2a7d8','#ef978f','#94c7b8','#d9ca83','#a3bde8'];
 let showTrails=!!load('apex-show-trails-v1',true),showDeaths=!!load('apex-show-deaths-v1',true);
 const physicalKeys=new Set();
-function persist(k,v){memory.set(k,v);try{localStorage.setItem(k,JSON.stringify(v));}catch{if(storageAvailable){storageAvailable=false;toast('存储不可用，设置暂时保留在本次页面中。');}}}
+function persist(k,v){memory.set(k,v);if(learningStorage&&k.startsWith('apex-vision-v3-')){learningStorage.write(k,v).then(()=>{try{localStorage.removeItem(k);}catch{}}).catch(()=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{toast('学习记忆保存失败，当前经验仍在；请保持页面打开。');}});return;}try{localStorage.setItem(k,JSON.stringify(v));}catch{if(storageAvailable){storageAvailable=false;toast('存储不可用，设置暂时保留在本次页面中。');}}}
 function load(k,fallback=null){return memory.has(k)?memory.get(k):read(k,fallback);}
 function toast(msg){$('toast').textContent=msg;$('toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').classList.remove('show'),3000);}
 function save(){if(learner)persist('apex-vision-v3-'+mapIndex,learner.serialize());}
-function init(index){mapIndex=index;persist('apex-selected-map-v1',index);map=E.makeMap(index,index===3?load('apex-custom-track-v2'):null);learner=new E.VisionLearner(load('apex-vision-v3-'+index));$('mapSelect').value=index;reset();drawMap();stats();}
+function init(index){mapIndex=index;persist('apex-selected-map-v1',index);map=E.makeMap(index,index===3?load('apex-custom-track-v2'):null);learner=new E.FleetLearner(load('apex-vision-v3-'+index));$('mapSelect').value=index;reset();drawMap();stats();}
 function clearHeld(){held.clear();keys.clear();physicalKeys.clear();pointers.clear();pointerPresses.clear();latched.clear();document.querySelectorAll('[data-action]').forEach(b=>{b.classList.remove('pressed');b.setAttribute('aria-pressed','false');});}
 function reset(resume=false){running=resume&&!E.drivingIssue(map);accumulator=0;learner.buffer=[];clearHeld();fleet=E.drivingIssue(map)?null:new E.FleetWorld(map,learner,config,fleetCount,visionRange);selectedCar=E.clamp(selectedCar,0,fleetCount-1);syncSelected();syncFleetSelector();observation=state?E.sense(map,state,visionRange,fleet.states()):null;$('trailLayer')?.replaceChildren();$('deathLayer')?.replaceChildren();$('result').classList.add('hidden');drawDynamic();update();}
+function observedLearner(){return fleet?.cars[selectedCar]?.learner||learner.forCar(selectedCar);}
 function syncSelected(){const c=fleet?.cars[selectedCar];state=c?.state??null;trail=c?.trail??[];}
 function carColor(id){return config.colors?.[id]||(id===0?config.color:fleetColors[(id-1)%fleetColors.length]);}
 function syncFleetSelector(){const select=$('observedCar');select.replaceChildren();for(let i=0;i<fleetCount;i++){const option=document.createElement('option');option.value=i;option.textContent=String(i+1).padStart(2,'0')+' 号';select.appendChild(option);}select.value=selectedCar;$('fleetCount').value=fleetCount;$('carColor').value=carColor(selectedCar);}
@@ -109,8 +110,8 @@ function updateCarRecords(){
 }
 function drawVision(){
  const layer=$('visionLayer');if(!layer||editing)return;layer.replaceChildren();
- if(!state){$('sensorReadings').replaceChildren();$('qValues').replaceChildren();$('goalBearing').textContent='—';$('trafficSeen').textContent='请先放置入口和出口';$('visionState').textContent='请先放置入口和出口';$('knownStates').textContent=Object.keys(learner.q).length.toLocaleString();return;}
- if(fleet?.cars[selectedCar].waiting&&!fleet.cars[selectedCar].active){$('sensorReadings').replaceChildren();$('qValues').replaceChildren();$('goalBearing').textContent='—';$('trafficSeen').textContent='这辆车正在入口排队，发车后显示实时视野';$('visionState').textContent='待发车';$('rewardValue').textContent=fleet.cars[selectedCar].lastReward.toFixed(2);$('knownStates').textContent=Object.keys(learner.q).length.toLocaleString();return;}
+ if(!state){$('sensorReadings').replaceChildren();$('qValues').replaceChildren();$('goalBearing').textContent='—';$('trafficSeen').textContent='请先放置入口和出口';$('visionState').textContent='请先放置入口和出口';$('knownStates').textContent=Object.keys(observedLearner().q).length.toLocaleString();return;}
+ if(fleet?.cars[selectedCar].waiting&&!fleet.cars[selectedCar].active){$('sensorReadings').replaceChildren();$('qValues').replaceChildren();$('goalBearing').textContent='—';$('trafficSeen').textContent='这辆车正在入口排队，发车后显示实时视野';$('visionState').textContent='待发车';$('rewardValue').textContent=fleet.cars[selectedCar].lastReward.toFixed(2);$('knownStates').textContent=Object.keys(observedLearner().q).length.toLocaleString();return;}
  observation=E.sense(map,state,visionRange,fleet?.states()||[]);const o=observation,[cx,cy]=point(state.x,state.y);
  const seenCars=[...new Set(o.rays.filter(r=>r.kind==='car').map(r=>r.vehicleId))];$('trafficSeen').textContent=seenCars.length?'看见 '+seenCars.map(id=>String(id+1).padStart(2,'0')+' 号').join('、'):'视野内未发现其他车辆';
  if(showVision){
@@ -122,14 +123,15 @@ function drawVision(){
  const names=['左后','左侧','左前','正前','右前','右侧','右后'];
  o.rays.forEach((r,i)=>{const el=document.createElement('div');el.className='sensor-reading';el.dataset.hitKind=r.kind;const title=document.createElement('span');title.textContent=names[i];const meter=document.createElement('i');meter.style.setProperty('--distance',Math.max(2,r.distance/visionRange*100)+'%');meter.style.setProperty('--ray',r.kind==='car'?'#75abc4':r.distance<.3?'#d98b71':r.distance<.7?'#c3aa6e':'#92b96b');const value=document.createElement('b');value.textContent=r.distance.toFixed(2);el.append(title,meter,value);readings.append(el);});
  $('goalBearing').textContent=(o.goalBearing*180/Math.PI).toFixed(0)+'°';$('visionState').textContent=E.observationKey(o);
- const qs=learner.q[E.observationKey(o)]||[0,0,0,0,0],best=Math.max(...qs),scale=Math.max(1,...qs.map(Math.abs));
+ const qs=observedLearner().q[E.observationKey(o)]||[0,0,0,0,0],best=Math.max(...qs),scale=Math.max(1,...qs.map(Math.abs));
  $('qValues').replaceChildren();E.ACTIONS.forEach((a,i)=>{const el=document.createElement('div');el.className='q-row'+(qs[i]===best?' best':'');const name=document.createElement('span');name.textContent={straight:'直行',accelerate:'加速',decelerate:'减速',left:'左转',right:'右转'}[a];const bar=document.createElement('i');bar.style.width=(8+Math.abs(qs[i])/scale*52)+'%';const value=document.createElement('b');value.textContent=qs[i].toFixed(2);el.append(name,bar,value);$('qValues').append(el);});
- $('rewardValue').textContent=(fleet?.cars[selectedCar]?.lastReward??learner.lastReward).toFixed(2);$('knownStates').textContent=Object.keys(learner.q).length.toLocaleString();
+ $('rewardValue').textContent=(fleet?.cars[selectedCar]?.lastReward??learner.lastReward).toFixed(2);$('knownStates').textContent=Object.keys(observedLearner().q).length.toLocaleString();
 }
 const actionNames={straight:['直行','→'],accelerate:['持续加速','↑'],decelerate:['持续减速','↓'],left:['持续左转','↰'],right:['持续右转','↱']};
 function update(){
  updateSurvival();
- $('memoryStatus').textContent=`已记忆 ${learner.experience.length.toLocaleString()} 条经历 · ${learner.outcomes.length.toLocaleString()} 条结局 · 累计回放 ${learner.replays.toLocaleString()} 次`;
+ $('policyStatus').textContent=observedLearner().episodes?'本车已学 '+observedLearner().episodes.toLocaleString()+' 轮':'本车尚未训练';
+ $('memoryStatus').textContent=`${String(selectedCar+1).padStart(2,'0')} 号独立记忆 · 已记忆 ${observedLearner().experience.length.toLocaleString()} 条经历 · ${observedLearner().outcomes.length.toLocaleString()} 条结局 · 累计回放 ${observedLearner().replays.toLocaleString()} 次`;
  $('decisionStatus').textContent=mode==='manual'?'所选赛车由你控制，其余车辆保留学习记忆':fleet?.cars[selectedCar]?.lastExploratory?'本次动作：随机探索':'本次动作：按累计 Q 值选择';
  const active=fleet?.cars.filter(c=>c.active).length||0,waiting=fleet?.cars.filter(c=>c.waiting).length||0;$('fleetStatus').textContent=`在场 ${active} · 等候 ${waiting} · 死亡 ${fleet?.deaths||0}`;$('agentBadge').textContent='CAR '+String(selectedCar+1).padStart(2,'0');$('fleetCount').disabled=training||editing;$('observedCar').disabled=editing||!fleet;$('clearTraces').disabled=training||editing||!fleet;updateCarRecords();
  if(fleet)for(const c of fleet.cars){const option=$('observedCar').options[c.id],text=String(c.id+1).padStart(2,'0')+' 号 · '+(c.active?'行驶':c.waiting?'待发':c.state.won?'已通关':'已结束');if(option&&option.textContent!==text)option.textContent=text;}
@@ -145,12 +147,12 @@ function update(){
  $('runStatus').textContent=editing?'正在编辑赛道':training?'车队正在加速训练':fleet?.cars[selectedCar].waiting?'所选赛车排队出发':state.done?state.reason:running?'车队连续行驶中':state.time?'已暂停':'等待车队出发';
  $('coordinates').textContent=`位置 (${state.x.toFixed(2)}, ${state.y.toFixed(2)}) · 朝向 ${((state.angle*180/Math.PI%360+360)%360).toFixed(0)}°`;
  $('modeTitle').textContent=mode==='ai'?'训练你的赛车':'接管方向盘';
- $('modeDesc').textContent=mode==='ai'?`${fleetCount} 辆车在同一赛道同时学习，共享 Q 表。蓝色射线表示探测到其他车辆。`:`你正在接管 ${String(selectedCar+1).padStart(2,'0')} 号车，其余赛车继续自动学习。轻点保持动作，再点松开。`;
+ $('modeDesc').textContent=mode==='ai'?`${fleetCount} 辆车在同一赛道同时学习，各自保存 Q 表和记忆。蓝色射线表示探测到其他车辆。`:`你正在接管 ${String(selectedCar+1).padStart(2,'0')} 号车，其余赛车继续自动学习。轻点保持动作，再点松开。`;
  $('actionHint').textContent=held.size?'持续执行：'+[...held].map(a=>actionNames[a][0]).join(' + ')+(latched.size?' · 再点同一按钮或「松开全部」停止施加动作':''):'轻点保持动作，再点松开；长按与键盘松手后保持当前车速和方向。';
 }
 function stats(){
  updateSurvival();
- const n=learner.episodes;$('episodes').innerHTML=n.toLocaleString()+' <small>轮</small>';const rate=learner.results.length?Math.round(100*learner.results.reduce((a,b)=>a+b,0)/learner.results.length):null;$('successRate').innerHTML=(rate??'—')+' <small>%</small>';$('bestTime').innerHTML=(learner.best===null?'—':learner.best.toFixed(1))+' <small>秒</small>';$('policyStatus').textContent=n?'已学习 '+n.toLocaleString()+' 轮':'尚未训练';
+ const n=learner.episodes;$('episodes').innerHTML=n.toLocaleString()+' <small>轮</small>';const rate=learner.results.length?Math.round(100*learner.results.reduce((a,b)=>a+b,0)/learner.results.length):null;$('successRate').innerHTML=(rate??'—')+' <small>%</small>';$('bestTime').innerHTML=(learner.best===null?'—':learner.best.toFixed(1))+' <small>秒</small>';$('policyStatus').textContent=observedLearner().episodes?'本车已学 '+observedLearner().episodes.toLocaleString()+' 轮':'本车尚未训练';
  const distances=learner.distances,average=distances.length?distances.reduce((a,b)=>a+b,0)/distances.length:0;$('learningNote').innerHTML=n?'最近 '+distances.length+' 轮平均行驶 '+average.toFixed(2)+' 格。<br><span>已学习 '+n.toLocaleString()+' 轮，继续观察与训练。</span>':'从射线距离开始积累驾驶经验。<br><span>先训练，再观察 Q 值怎样影响动作。</span>';
  const h=learner.history,sl=$('sparkline');sl.replaceChildren();if(h.length>1){const d=h.map((v,i)=>`${i?'L':'M'}${(i/(h.length-1)*108+2).toFixed(1)},${(36-v*30).toFixed(1)}`).join(' ');svg('path',{d:d+' L110 40 L2 40Z',fill:'#eff5e4'},sl);svg('path',{d,fill:'none',stroke:'#97b66b','stroke-width':1.7},sl);}drawVision();
 }
@@ -185,7 +187,7 @@ function locked(v){for(const id of ['mapSelect','start','reset','clearTraining',
 async function train(fresh=false){
  if(trainingTask){trainingTask.stop=true;trainingTask.restart=trainingTask.restart||fresh;update();return;}
  if(editing||!ready())return;
- running=false;mode='ai';clearHeld();if(fresh){learner=new E.VisionLearner();save();}reset();stats();
+ running=false;mode='ai';clearHeld();if(fresh){learner=new E.FleetLearner();save();}reset();stats();
  const job={stop:false,restart:false};trainingTask=job;training=true;learner.buffer=[];locked(true);clearTimeout(progressHideTimer);$('trainingProgress').classList.remove('hidden');$('progressBar').style.width='0%';$('progressText').textContent=fresh?'已清空经验，从零开始…':'准备继续训练…';let count=0,failed=false;const epsilon=Number($('exploration').value)/100;update();
  const startingEpisodes=learner.episodes;
  try{while(count<5000&&!job.stop){const started=performance.now();do{fleet.step(1/120,{epsilon:Math.max(.03,epsilon/(1+learner.episodes/2000)),repeat:true});count=learner.episodes-startingEpisodes;}while(count<5000&&performance.now()-started<12);syncSelected();handleFleetEvents(false);$('progressBar').style.width=Math.min(100,count/50)+'%';$('progressText').textContent=`${fleetCount} 辆并行 · 本次 ${count.toLocaleString()} / 5,000 轮 · 累计 ${learner.episodes.toLocaleString()} 轮`;drawDynamic(false);update();stats();await new Promise(r=>setTimeout(r,0));}}
@@ -256,7 +258,7 @@ function releaseAll(){clearHeld();if(running){running=false;update();}}
 window.addEventListener('blur',releaseAll);document.addEventListener('visibilitychange',()=>{if(document.hidden)releaseAll();});
 $('exploration').oninput=e=>$('exploreValue').textContent=e.target.value+'%';$('mapSelect').onchange=e=>{save();init(Number(e.target.value));toast('已切换赛道。');};
 $('routeToggle').onclick=()=>{routeVisible=!routeVisible;$('routeToggle').setAttribute('aria-pressed',routeVisible);drawReference();};
-$('clearTraining').onclick=()=>{if(training||editing)return;learner=new E.VisionLearner();save();reset();stats();toast('当前赛道的视野驾驶经验已清空。');};
+$('clearTraining').onclick=()=>{if(training||editing)return;learner=new E.FleetLearner();save();reset();stats();toast('当前赛道的视野驾驶经验已清空。');};
 $('help').onclick=()=>{running=false;clearHeld();update();$('helpDialog').showModal();};$('closeHelp').onclick=$('gotIt').onclick=()=>$('helpDialog').close();
 $('helpDialog').onclick=e=>{if(e.target===$('helpDialog')){const r=e.target.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)e.target.close();}};
 for(const k of ['maxSpeed','acceleration','steering']){$(k).value=config[k];$(k+'Value').textContent=config[k];$(k).oninput=e=>{config[k]=Number(e.target.value);$(k+'Value').textContent=config[k];persist('apex-car-v2',config);};}
@@ -267,5 +269,7 @@ $('visionRange').oninput=e=>{visionRange=Number(e.target.value);$('visionRangeVa
 $('fleetCount').onchange=e=>{if(training||editing)return;save();fleetCount=Number(e.target.value);persist('apex-fleet-count-v1',fleetCount);reset();stats();e.target.blur();toast(`已切换为 ${fleetCount} 辆赛车，学习经验保留。`);};$('observedCar').onchange=e=>{selectCar(Number(e.target.value));e.target.blur();};
 $('liveExplore').checked=liveExplore;$('liveExplore').onchange=e=>{liveExplore=e.target.checked;persist('apex-live-explore-v1',liveExplore);update();};
 $('showTrails').checked=showTrails;$('showTrails').onchange=e=>{showTrails=e.target.checked;persist('apex-show-trails-v1',showTrails);drawDynamic();};$('showDeaths').checked=showDeaths;$('showDeaths').onchange=e=>{showDeaths=e.target.checked;persist('apex-show-deaths-v1',showDeaths);drawDynamic();};$('clearTraces').onclick=()=>{if(!fleet||training||editing)return;fleet.clearHistory();drawDynamic();update();toast('已清除画面轨迹和死亡标记，学习经验保留。');};
-window.addEventListener('beforeunload',save);const selectedMap=load('apex-selected-map-v1',0);init(Number.isInteger(selectedMap)&&selectedMap>=0&&selectedMap<=3?selectedMap:0);requestAnimationFrame(frame);
+window.addEventListener('beforeunload',()=>{if(learner)save();});
+async function boot(){const controls=[...document.querySelectorAll('button,input,select')].map(el=>[el,el.disabled]);controls.forEach(([el])=>el.disabled=true);$('runStatus').textContent='正在载入赛车记忆…';try{learningStorage=await openLearningStorage();if(learningStorage){const saved=await learningStorage.read([0,1,2,3].map(i=>'apex-vision-v3-'+i));for(const[k,v]of saved)memory.set(k,v);}}catch{learningStorage=null;}controls.forEach(([el,disabled])=>el.disabled=disabled);const selectedMap=load('apex-selected-map-v1',0);init(Number.isInteger(selectedMap)&&selectedMap>=0&&selectedMap<=3?selectedMap:0);requestAnimationFrame(frame);}
+void boot();
 })();
