@@ -155,7 +155,7 @@ function updateSurvival(){$('survivalCard').classList.toggle('hidden',learner.ha
 
 function handleFleetEvents(persistRecords=true){
  const events=fleet?.drainEvents()||[];if(!events.length)return;
- if(!training)for(const event of events)if(event.id===selectedCar){const s=event.state;$('result').classList.remove('hidden');$('result').innerHTML=String(event.id+1).padStart(2,'0')+' 号 · '+(s.won?'⚑ 成功抵达出口！':'↺ '+s.reason)+'<small>'+s.distance.toFixed(2)+' 格 · '+s.time.toFixed(1)+' 秒'+($('autoRepeat').checked?' · 将重新排队出发':' · 其余赛车继续运行')+'</small>';clearHeld();}
+ if(!training)for(const event of events)if(event.id===selectedCar){const s=event.state;$('result').classList.remove('hidden');$('result').innerHTML=String(event.id+1).padStart(2,'0')+' 号 · '+(s.won?'⚑ 成功抵达出口！':'↺ '+s.reason)+'<small>'+s.distance.toFixed(2)+' 格 · '+s.time.toFixed(1)+' 秒'+($('autoRepeat').checked?' · 已记录，将自动重新出发':' · 已记录，其余赛车继续运行')+'</small>';clearHeld();}
  if(persistRecords){if(performance.now()-lastFleetSave>1000||fleet.allFinished){save();lastFleetSave=performance.now();}stats();}
 }
 let lastFleetSave=0;
@@ -167,7 +167,7 @@ function frame(now){
  const elapsed=last?Math.min((now-last)/1000,1):0;last=now;
  if(running&&!training&&!editing&&fleet){
   accumulator+=elapsed;while(accumulator>=1/120&&($('autoRepeat').checked||!fleet.allFinished)){advance(1/120);accumulator-=1/120;}
-  handleFleetEvents();if(fleet.cars[selectedCar].active)$('result').classList.add('hidden');
+  handleFleetEvents();
   if(!$('autoRepeat').checked&&fleet.allFinished){running=false;save();update();}
   drawDynamic(false);renderClock+=elapsed;if(renderClock>1/15){renderClock=0;update();drawVision();}
  }
