@@ -40,20 +40,24 @@ function newlyVisited(before,after,visited){
  const add=t=>{const x=before.x+(after.x-before.x)*t,y=before.y+(after.y-before.y)*t,key=Math.floor(x*2)+','+Math.floor(y*2);if(!visited.has(key)){visited.add(key);count++;}};
  for(let i=1;i<cuts.length;i++)add((cuts[i-1]+cuts[i])/2);add(1);return count;
 }
-function rewardFor(map,before,after,visited){
+function rewardFor(map,before,after,visited,action=after.action){
  // Bound repeated circling by actual travel, never by how slowly a car drives.
  const repeating=after.distance>Math.max(100,map.roads.size*8);
  if(!after.done&&repeating){after.done=true;after.reason='重复行驶路程过多，重新探索';}
  const old=Math.hypot(before.x-map.goal[0],before.y-map.goal[1]),dist=Math.hypot(after.x-map.goal[0],after.y-map.goal[1]);
  let reward=3*(old-dist)-.02*Math.max(0,after.distance-before.distance);
  reward+=.08*newlyVisited(before,after,visited);
+ if(!after.done){
+  if(action==='decelerate')reward-=.04*Math.max(0,before.speed-after.speed);
+  if(after.distance===before.distance)reward-=action==='decelerate'?.12:.02;
+ }
  if(after.done&&!after.truncated)reward+=after.won?80:repeating?-5:-15;
  return reward;
 }
 class VisionEnvironment{
  constructor(map,config,range=4){this.map=map;this.config=config;this.range=range;this.state=E.continuousInitial(map);this.visited=new Set();}
  observe(){return sense(this.map,this.state,this.range);}
- step(action){const before=this.state;let s=before;for(let i=0;i<8&&!s.done;i++)s=E.advanceManual(this.map,s,controls[action],1/120,this.config);this.state=s;const reward=rewardFor(this.map,before,s,this.visited);return {observation:this.observe(),reward,done:s.done,distance:Math.max(0,s.distance-before.distance),truncated:!!s.truncated};}
+ step(action){const before=this.state;let s=before;for(let i=0;i<8&&!s.done;i++)s=E.advanceManual(this.map,s,controls[action],1/120,this.config);this.state=s;const reward=rewardFor(this.map,before,s,this.visited,action);return {observation:this.observe(),reward,done:s.done,distance:Math.max(0,s.distance-before.distance),fixedPoint:before.x===s.x&&before.y===s.y&&before.speed===s.speed&&before.angle===s.angle,truncated:!!s.truncated};}
 }
 class VisionLearner{
  constructor(data){this.memoryLimit=data?.memoryLimit||4096;this.outcomeLimit=data?.outcomeLimit||512;this.q=data?.q||{};this.episodes=data?.episodes||0;this.results=data?.results||[];this.best=data?.best??null;this.bestDistance=Number.isFinite(data?.bestDistance)?data.bestDistance:null;this.history=data?.history||[];this.distances=data?.distances||[];this.longestSurvival=Number.isFinite(data?.longestSurvival)?Math.max(0,data.longestSurvival):0;this.hasCleared=!!data?.hasCleared||this.best!==null||this.results.includes(1);this.buffer=[];this.lastReward=0;this.experience=(data?.experience||[]).slice(-this.memoryLimit);this.outcomes=(data?.outcomes||[]).slice(-this.outcomeLimit);this.transitions=Math.max(data?.transitions||0,this.experience.length);this.terminalTransitions=Math.max(data?.terminalTransitions||0,this.outcomes.length);this.replays=data?.replays||0;}
@@ -63,19 +67,22 @@ class VisionLearner{
   this.lastReward=reward;const key=policyKey(o),nextKey=policyKey(next),index=ACTIONS.indexOf(a),row=this.values(o),nextRow=this.values(next);
   // Watkins Q(lambda): an exploratory, non-greedy action breaks earlier credit.
   // Its later failure must not blame the safe choices before that deviation.
-  if(row[index]<Math.max(...row)-1e-10)stream.length=0;
+  if(row[index]<Math.max(...row)-1e-10||(step.fixedPoint&&reward<0))stream.length=0;
   const duplicate=stream.findIndex(t=>t.key===key&&t.index===index);if(duplicate>=0)stream.splice(duplicate,1);
   const distance=Math.max(0,step.distance??1),discount=distanceDiscount(distance),terminal=done;
   stream.push({key,index,distance});if(stream.length>96)stream.shift();
-  const delta=reward+(terminal?0:discount*Math.max(...nextRow))-row[index];let eligibility=1;
+  // A negative-cost exact self-loop is worth taking once before a different
+  // action, never an optimistic promise to repeat the same brake forever.
+  const future=step.fixedPoint&&reward<0?Math.max(...nextRow.filter((_,i)=>i!==index)):Math.max(...nextRow);
+  const delta=reward+(terminal?0:discount*future)-row[index];let eligibility=1;
   for(let i=stream.length-1;i>=0&&eligibility>.001;i--){const t=stream[i];this.q[t.key][t.index]+=.18*delta*eligibility;eligibility*=distanceDiscount(t.distance)*Math.pow(.85,t.distance);}
   if(done)stream.length=0;
   // Replay earlier episodes as well as the current one. Each car's eligibility
   // trace stays private; only its own real transitions enter each driver’s durable memory.
-  const replay=t=>{if(!t||t.rewardVersion!==3||(t.done&&t.reward===0&&t.discount===1))return;const r=this.q[t.key],n=this.q[t.nextKey];if(!r||!n)return;r[t.index]+=.06*(t.reward+(t.done?0:t.discount*Math.max(...n))-r[t.index]);this.replays++;};
+  const replay=t=>{if(!t||t.rewardVersion!==4)return;const r=this.q[t.key],n=this.q[t.nextKey];if(!r||!n)return;const future=t.fixedPoint&&t.reward<0?Math.max(...n.filter((_,i)=>i!==t.index)):Math.max(...n);r[t.index]+=.06*(t.reward+(t.done?0:t.discount*future)-r[t.index]);this.replays++;};
   for(let i=0;i<2&&this.experience.length;i++)replay(this.experience[Math.floor(Math.random()*this.experience.length)]);
   if(this.transitions%4===0&&this.outcomes.length)replay(this.outcomes[Math.floor(Math.random()*this.outcomes.length)]);
-  const transition={key,index,nextKey,reward,done:terminal,discount,rewardVersion:3};this.transitions++;
+  const transition={key,index,nextKey,reward,done:terminal,discount,fixedPoint:!!step.fixedPoint,rewardVersion:4};this.transitions++;
   if(this.experience.length<this.memoryLimit)this.experience.push(transition);else{const slot=Math.floor(Math.random()*this.transitions);if(slot<this.memoryLimit)this.experience[slot]=transition;}
   if(done){this.terminalTransitions++;if(this.outcomes.length<this.outcomeLimit)this.outcomes.push(transition);else{const slot=Math.floor(Math.random()*this.terminalTransitions);if(slot<this.outcomeLimit)this.outcomes[slot]=transition;}}
  }

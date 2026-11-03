@@ -254,8 +254,25 @@ const shortSlow={...initial,won:true,distance:8,time:1000},longFast={...initial,
 assert(E.compareScore(E.distanceScore(shortSlow,20,map),E.distanceScore(longFast,20,map))>0,'A shorter successful route must beat a faster longer route');
 assert.deepEqual(E.distanceScore(shortSlow,20,map),E.distanceScore({...shortSlow,time:1},20,map),'Time must not break ties in champion selection');
 const parked={...initial,speed:0,time:11};
-assert.equal(E.rewardFor(map,{...initial,speed:0},parked,new Set()),0,'Parking must receive zero reward without ending the attempt');
+assert.equal(E.rewardFor(map,{...initial,speed:0},parked,new Set()),-.02,'A non-moving action must receive a negative reward without ending the attempt');
 assert(!parked.done);assert(!parked.truncated);
+const parkedBrake={...parked,action:'decelerate'};
+assert.equal(E.rewardFor(map,{...initial,speed:0},parkedBrake,new Set()),-.12,'Braking while already stopped must cost more than another idle action');
+assert(!parkedBrake.done,'Negative braking feedback must not restore the removed parking death rule');
+const brakingAfter={...initial,x:.1,distance:.1,speed:.8,time:1,action:'decelerate'};
+const coastingAfter={...brakingAfter,action:'straight'};
+const brakeReward=E.rewardFor(map,initial,brakingAfter,new Set()),coastReward=E.rewardFor(map,initial,coastingAfter,new Set());
+assert(Math.abs(coastReward-brakeReward-.04*.2)<1e-10,'Useful moving braking gets a small cost proportional to actual speed reduction');
+assert(brakeReward>0,'Making road progress while braking must still earn net progress reward');
+for(const elite of [false,true]){
+ const group=new E.FleetLearner(),driver=group.forCar(0),stoppedView=E.sense(map,{...initial,speed:0});driver.values(stoppedView)[2]=100;
+ if(elite)group.champion={id:0,generation:1,scoreVersion:2,score:[0,0,-99,0],won:false,time:0,distance:0,coverage:0,model:JSON.parse(JSON.stringify(driver.serialize()))};
+ const recovery=new E.FleetWorld(map,group,config,1);recovery.cars[0].state.speed=0;
+ for(let i=0;i<1200&&recovery.cars[0].state.distance<.02;i++)recovery.step(1/120,{epsilon:0});
+ assert(recovery.cars[0].state.distance>=.02,'A high-valued legacy parking/braking policy must learn to leave the start, including an elite driver');
+ assert.equal(recovery.cars[0].attempts,1);assert.equal(recovery.deaths,0);
+ if(elite)assert.equal(group.champion.model.q[E.policyKey(stoppedView)][2],100,'Negative feedback must update the live elite without overwriting its saved checkpoint');
+}
 const slowReward=E.rewardFor(map,slowBefore,slowAfter,new Set()),fastReward=E.rewardFor(map,slowBefore,fastAfter,new Set());
 assert.equal(slowAfter.done,false,'A car still moving after 45 seconds must not time out');
 assert.equal(slowAfter.idleTime,0,'Any actual movement must reset the parking timer regardless of speed');
@@ -294,7 +311,7 @@ const erased = E.makeMap(3, custom);
 assert(!E.onRoad(erased, 7, 8));
 assert(E.sense(erased, { ...initial, x: 5.5 }).rays[3].distance < 1, 'Erasing a road must immediately change the sensors');
 assert(E.reference(erased).at(-1).won, 'Optional human reference route should still work');
-if(process.argv.includes('--parking-check')){
+if(process.argv.includes('--parking-check')||process.argv.includes('--braking-check')){
  console.log('Parking for 120 seconds, no death/respawn/episode reset, acceleration from the same attempt, and non-mutating offline evaluation: passed');
  process.exit(0);
 }

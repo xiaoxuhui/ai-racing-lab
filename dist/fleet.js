@@ -49,8 +49,8 @@ class FleetWorld{
   for(const car of active){
    const manual=car.id===manualId;
    if(!manual&&(car.ticks>=8||car.state.done)){
-    const decision=car.decision,seen=E.sense(this.map,car.state,this.range,afterStates),reward=E.rewardFor(this.map,decision.before,car.state,car.visited);
-    if(!decision.elite)car.learner.learn(decision.observation,decision.action,seen,reward,car.state.done,car.buffer,{distance:Math.max(0,car.state.distance-decision.before.distance),truncated:!!car.state.truncated});car.lastReward=reward;car.decision=null;car.ticks=0;
+    const decision=car.decision,seen=E.sense(this.map,car.state,this.range,afterStates),reward=E.rewardFor(this.map,decision.before,car.state,car.visited,decision.action),fixedPoint=decision.before.x===car.state.x&&decision.before.y===car.state.y&&decision.before.speed===car.state.speed&&decision.before.angle===car.state.angle;
+    if(!decision.elite||car.state.distance===decision.before.distance)car.learner.learn(decision.observation,decision.action,seen,reward,car.state.done,car.buffer,{distance:Math.max(0,car.state.distance-decision.before.distance),fixedPoint,truncated:!!car.state.truncated});car.lastReward=reward;car.decision=null;car.ticks=0;
    }
    car.learner.observeSurvival(car.state);if(car.learner!==this.learner)this.learner.observeSurvival(car.state);
    const p=car.trail.at(-1),moved=p?Math.hypot(car.state.x-p[0],car.state.y-p[1]):Infinity;if(moved>.06||(car.state.done&&moved>1e-8)){car.trail.push([car.state.x,car.state.y]);if(car.trail.length>1200){const last=car.trail.length-1;car.trail=car.trail.filter((_,i)=>i%2===0||i===last);}car.trailVersion++;}
