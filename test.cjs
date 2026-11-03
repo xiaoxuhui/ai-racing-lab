@@ -111,7 +111,7 @@ assert(Math.abs(traffic.rays[3].distance-.74)<1e-10,'Front ray must stop at the 
 assert.notEqual(E.observationKey(traffic),E.observationKey(E.sense(map,observer)),'Traffic must influence the policy state');
 assert.equal(E.policyKey(traffic),E.policyKey(E.sense(map,observer)),'Visible ghost cars must not hide the road geometry used to drive the champion policy');
 assert.equal(traffic.rays[3].roadDistance,4,'Keep a separate road scan while still visibly detecting the front car');
-const yielding={...observer,speed:0,time:10.1};E.rewardFor(map,{...observer,speed:0,time:0},yielding,new Set(),traffic);assert(yielding.done,'Actual stationary parking must end after ten seconds even when ghost traffic is visible');
+const yielding={...observer,speed:0,time:10.1};E.rewardFor(map,{...observer,speed:0,time:0},yielding,new Set(),traffic);assert(!yielding.done,'Stationary parking must remain allowed even when ghost traffic is visible');
 assert.equal(E.sense(map,observer,4,[observer]).rays[3].kind,'clear','A car must not see itself');
 const underpass={...initial,x:6,y:5,angle:Math.PI/2,carId:2,bridgeLock:{x:6,y:5,axis:'v'}},overpass={...initial,x:6,y:5,carId:3,bridgeLock:{x:6,y:5,axis:'h'}};
 assert(!E.sameDeck(map,underpass,overpass));
@@ -254,8 +254,8 @@ const shortSlow={...initial,won:true,distance:8,time:1000},longFast={...initial,
 assert(E.compareScore(E.distanceScore(shortSlow,20,map),E.distanceScore(longFast,20,map))>0,'A shorter successful route must beat a faster longer route');
 assert.deepEqual(E.distanceScore(shortSlow,20,map),E.distanceScore({...shortSlow,time:1},20,map),'Time must not break ties in champion selection');
 const parked={...initial,speed:0,time:11};
-assert.equal(E.rewardFor(map,{...initial,speed:0},parked,new Set()),0,'Stationary restart is a watchdog reset, not a timed reward penalty');
-assert(parked.truncated);
+assert.equal(E.rewardFor(map,{...initial,speed:0},parked,new Set()),0,'Parking must receive zero reward without ending the attempt');
+assert(!parked.done);assert(!parked.truncated);
 const slowReward=E.rewardFor(map,slowBefore,slowAfter,new Set()),fastReward=E.rewardFor(map,slowBefore,fastAfter,new Set());
 assert.equal(slowAfter.done,false,'A car still moving after 45 seconds must not time out');
 assert.equal(slowAfter.idleTime,0,'Any actual movement must reset the parking timer regardless of speed');
@@ -265,8 +265,16 @@ for(let i=0;i<135;i++)stopAndGo.step('straight');
 assert(!stopAndGo.state.done,'A brief real stop must leave time to accelerate again');
 stopAndGo.step('accelerate');assert.equal(stopAndGo.state.idleTime,0);assert(!stopAndGo.state.done);
 const trulyStopped=new E.VisionEnvironment(map,config);trulyStopped.state.speed=0;
-while(!trulyStopped.state.done)trulyStopped.step('straight');
-assert(trulyStopped.state.time>=10);assert.equal(trulyStopped.state.reason,'连续 10 秒没有移动');
+for(let i=0;i<1800;i++)trulyStopped.step('straight');
+assert(trulyStopped.state.time>119);assert(!trulyStopped.state.done);assert.equal(trulyStopped.state.reason,'');
+trulyStopped.step('accelerate');assert(trulyStopped.state.x>map.start[0]);assert(!trulyStopped.state.done);
+const waitingGroup=new E.FleetLearner(),waitingWorld=new E.FleetWorld(map,waitingGroup,config,1);waitingWorld.cars[0].state.speed=0;waitingWorld.cars[0].learner.choose=()=> 'straight';
+for(let i=0;i<14400;i++)waitingWorld.step(1/120);
+assert(waitingWorld.cars[0].active);assert(!waitingWorld.cars[0].state.done);assert.equal(waitingWorld.cars[0].attempts,1);assert.equal(waitingWorld.deaths,0);assert.equal(waitingGroup.episodes,0);
+const parkedX=waitingWorld.cars[0].state.x;for(let i=0;i<60;i++)waitingWorld.step(1/120,{manualId:0,control:E.CONTROLS.accelerate});
+assert(waitingWorld.cars[0].state.x>parkedX);assert.equal(waitingWorld.cars[0].attempts,1,'The same parked attempt must resume rather than respawning');
+const stationaryQ=JSON.stringify(waitingWorld.cars[0].learner.q),stationaryEvaluation=E.evaluatePolicy(waitingWorld.cars[0].learner.serialize(),map,{...config,maxSpeed:0});
+assert(!stationaryEvaluation.won);assert.equal(JSON.stringify(waitingWorld.cars[0].learner.q),stationaryQ,'Offline evaluation must not kill or modify a live parked car');
 // Brake to below the former .18 cutoff, coast, turn through 90 degrees and
 // reach the goal well past the former 45-second deadline.
 const slowRoads=[];for(let x=1;x<=7;x++)slowRoads.push(`${x},5`);for(let y=2;y<5;y++)slowRoads.push(`7,${y}`);
@@ -286,6 +294,10 @@ const erased = E.makeMap(3, custom);
 assert(!E.onRoad(erased, 7, 8));
 assert(E.sense(erased, { ...initial, x: 5.5 }).rays[3].distance < 1, 'Erasing a road must immediately change the sensors');
 assert(E.reference(erased).at(-1).won, 'Optional human reference route should still work');
+if(process.argv.includes('--parking-check')){
+ console.log('Parking for 120 seconds, no death/respawn/episode reset, acceleration from the same attempt, and non-mutating offline evaluation: passed');
+ process.exit(0);
+}
 Object.defineProperty(map, 'dist', { get() { throw new Error('The driving learner must not access path distances'); } });
 let randomDistance = 0;
 for (let i = 0; i < 30; i++) {
@@ -303,7 +315,7 @@ const evaluation = new E.VisionEnvironment(map, config);
 // Evaluate the retained champion, as the app does, rather than the mutable last
 // exploratory policy. No random tie-breaking is used in elite demonstrations.
 const retainedPolicy=new E.VisionLearner(learnedChampion.model);
-while (!evaluation.state.done){const q=retainedPolicy.values(evaluation.observe());evaluation.step(E.ACTIONS[q.indexOf(Math.max(...q))]);}
+for(let observationBudget=0;observationBudget<20000&&!evaluation.state.done;observationBudget++){const q=retainedPolicy.values(evaluation.observe());evaluation.step(E.ACTIONS[q.indexOf(Math.max(...q))]);}
 assert(evaluation.state.distance > randomDistance / 30 * 3, 'The selected trained champion must retain travel beyond the random baseline');
 assert.equal(learner.episodes, 5000);
 const restored = new E.VisionLearner(JSON.parse(JSON.stringify(learner.serialize())));
@@ -319,7 +331,7 @@ Math.random=()=>((straightSeed=(Math.imul(straightSeed,1664525)+1013904223)>>>0)
 const straightMap=E.makeMap(3,{width:10,height:7,roads:Array.from({length:8},(_,i)=>`${i+1},3`),bridges:[],start:[1,3],goal:[8,3],startDir:0});
 const straightLearner=new E.VisionLearner();
 for(let i=0;i<600;i++)straightLearner.episode(straightMap,config,.12);
-function verifyStraight(policy){for(let i=0;i<10;i++){const env=new E.VisionEnvironment(straightMap,config);while(!env.state.done)env.step(policy.choose(env.observe(),0));assert(env.state.won,'A learned straight-track solution must survive an isolated exploratory death');}}
+function verifyStraight(policy){for(let i=0;i<10;i++){const env=new E.VisionEnvironment(straightMap,config);for(let observationBudget=0;observationBudget<20000&&!env.state.done;observationBudget++)env.step(policy.choose(env.observe(),0));assert(env.state.won,'A learned straight-track solution must survive an isolated exploratory death');}}
 verifyStraight(straightLearner);
 const exploratoryRun=new E.VisionEnvironment(straightMap,config);let exploratoryView=exploratoryRun.observe();
 while(!exploratoryRun.state.done){const a=exploratoryRun.state.time<1?'straight':'left',r=exploratoryRun.step(a);straightLearner.learn(exploratoryView,a,r.observation,r.reward,r.done);exploratoryView=r.observation;}

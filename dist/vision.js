@@ -41,9 +41,6 @@ function newlyVisited(before,after,visited){
  for(let i=1;i<cuts.length;i++)add((cuts[i-1]+cuts[i])/2);add(1);return count;
 }
 function rewardFor(map,before,after,visited){
- const moved=after.x!==before.x||after.y!==before.y;
- after.idleTime=moved?0:(before.idleTime||0)+(after.time-before.time);
- if(!after.done&&after.idleTime>=10){after.done=true;after.truncated=true;after.reason='连续 10 秒没有移动';}
  // Bound repeated circling by actual travel, never by how slowly a car drives.
  const repeating=after.distance>Math.max(100,map.roads.size*8);
  if(!after.done&&repeating){after.done=true;after.reason='重复行驶路程过多，重新探索';}
@@ -75,7 +72,7 @@ class VisionLearner{
   if(done)stream.length=0;
   // Replay earlier episodes as well as the current one. Each car's eligibility
   // trace stays private; only its own real transitions enter each driver’s durable memory.
-  const replay=t=>{if(!t||t.rewardVersion!==3)return;const r=this.q[t.key],n=this.q[t.nextKey];if(!r||!n)return;r[t.index]+=.06*(t.reward+(t.done?0:t.discount*Math.max(...n))-r[t.index]);this.replays++;};
+  const replay=t=>{if(!t||t.rewardVersion!==3||(t.done&&t.reward===0&&t.discount===1))return;const r=this.q[t.key],n=this.q[t.nextKey];if(!r||!n)return;r[t.index]+=.06*(t.reward+(t.done?0:t.discount*Math.max(...n))-r[t.index]);this.replays++;};
   for(let i=0;i<2&&this.experience.length;i++)replay(this.experience[Math.floor(Math.random()*this.experience.length)]);
   if(this.transitions%4===0&&this.outcomes.length)replay(this.outcomes[Math.floor(Math.random()*this.outcomes.length)]);
   const transition={key,index,nextKey,reward,done:terminal,discount,rewardVersion:3};this.transitions++;

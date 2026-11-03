@@ -7,9 +7,13 @@ function compareScore(a,b){if(!b)return 1;for(let i=0;i<a.length;i++)if(Math.abs
 function distanceScore(state,coverage,map){return [state.won?1:0,state.won?-state.distance:coverage,state.won?0:-Math.hypot(state.x-map.goal[0],state.y-map.goal[1]),-state.distance];}
 function evaluatePolicy(model,map,config,range=4){
  const policy=new E.VisionLearner(copy(model)),env=new E.VisionEnvironment(map,config,range);
- while(!env.state.done){const q=policy.values(env.observe());env.step(E.ACTIONS[q.indexOf(Math.max(...q))]);}
+ // This is an offline calculation, not the live car. A fixed point needs no
+ // further evaluation; a calculation budget also keeps rotating policies from
+ // blocking the UI. Neither condition kills or restarts any live vehicle.
+ let steps=0,evaluationLimited=false;
+ while(!env.state.done){const q=policy.values(env.observe()),before=env.state;env.step(E.ACTIONS[q.indexOf(Math.max(...q))]);const after=env.state;if(!after.done&&before.x===after.x&&before.y===after.y&&before.speed===after.speed&&before.angle===after.angle){evaluationLimited=true;break;}if(++steps>=12000&&!after.done){evaluationLimited=true;break;}}
  const s=env.state;
- return {score:distanceScore(s,env.visited.size,map),scoreVersion:2,won:s.won,time:s.time,distance:s.distance,coverage:env.visited.size,model:policy.serialize()};
+ return {score:distanceScore(s,env.visited.size,map),scoreVersion:2,won:s.won,time:s.time,distance:s.distance,coverage:env.visited.size,evaluationLimited,model:policy.serialize()};
 }
 class FleetWorld{
  constructor(map,learner,config,count=8,range=4){
